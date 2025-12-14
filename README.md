@@ -15,9 +15,14 @@ A proxy server that exposes an Anthropic Messages API-compatible endpoint while 
 ## Installation
 
 ```bash
-pip install -e .
+pip install anthropic-bridge
+```
 
-# With development dependencies
+For development:
+
+```bash
+git clone https://github.com/michaelgendy/anthropic-bridge.git
+cd anthropic-bridge
 pip install -e ".[test,dev]"
 ```
 
