@@ -1,0 +1,83 @@
+[project]
+name = "anthropic-bridge"
+version = "0.1.0"
+description = "Bridge Anthropic API to OpenRouter models"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.115.0",
+    "uvicorn>=0.32.0",
+    "httpx>=0.28.0",
+]
+
+[project.optional-dependencies]
+test = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.24.0",
+]
+dev = [
+    "mypy>=1.13.0",
+    "ruff>=0.8.0",
+]
+
+[project.scripts]
+anthropic-bridge = "anthropic_bridge.__main__:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+
+[tool.mypy]
+python_version = "3.13"
+strict_optional = true
+check_untyped_defs = true
+warn_return_any = true
+warn_unused_ignores = true
+no_implicit_optional = true
+warn_redundant_casts = true
+warn_unreachable = true
+show_error_codes = true
+ignore_missing_imports = true
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+disallow_any_generics = true
+strict_equality = true
+extra_checks = true
+exclude = [
+    "tests/",
+]
+
+[tool.ruff]
+line-length = 88
+exclude = [
+    ".git",
+    ".ruff_cache",
+    "__pycache__",
+    "venv",
+    "env",
+    ".env",
+    ".venv",
+]
+target-version = "py313"
+
+[tool.ruff.lint]
+select = ["E", "F", "B", "I"]
+dummy-variable-rgx = "^(_+|(_+[a-zA-Z0-9_]*[a-zA-Z0-9]+?))$"
+ignore = [
+    "B008",  # Do not perform function call in argument defaults (common in FastAPI with Depends)
+    "E501",  # Line too long (handled by formatter)
+    "B904",  # Use 'raise ... from err'
+    "B006",  # Do not use mutable data structures for argument defaults
+]
+
+[tool.ruff.lint.mccabe]
+max-complexity = 10
+
+[tool.ruff.lint.per-file-ignores]
+"__init__.py" = ["E402", "F401"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["anthropic_bridge"]
