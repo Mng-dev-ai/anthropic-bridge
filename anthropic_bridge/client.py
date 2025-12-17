@@ -213,6 +213,7 @@ class OpenRouterClient:
                                     "content_block": {
                                         "type": "thinking",
                                         "thinking": "",
+                                        "signature": "",
                                     },
                                 },
                             )
@@ -232,6 +233,14 @@ class OpenRouterClient:
 
                     if content:
                         if thinking_started:
+                            yield self._sse(
+                                "content_block_delta",
+                                {
+                                    "type": "content_block_delta",
+                                    "index": thinking_idx,
+                                    "delta": {"type": "signature_delta", "signature": ""},
+                                },
+                            )
                             yield self._sse(
                                 "content_block_stop",
                                 {"type": "content_block_stop", "index": thinking_idx},
@@ -376,6 +385,14 @@ class OpenRouterClient:
                                     )
 
         if thinking_started:
+            yield self._sse(
+                "content_block_delta",
+                {
+                    "type": "content_block_delta",
+                    "index": thinking_idx,
+                    "delta": {"type": "signature_delta", "signature": ""},
+                },
+            )
             yield self._sse(
                 "content_block_stop",
                 {"type": "content_block_stop", "index": thinking_idx},
