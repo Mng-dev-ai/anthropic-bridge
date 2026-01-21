@@ -6,11 +6,13 @@ import os
 import pty
 import random
 import string
+import termios
 import time
 from collections.abc import AsyncIterator
 from typing import Any, Callable
 
 logger = logging.getLogger(__name__)
+
 
 class PtyLineReader:
     def __init__(self, queue: "asyncio.Queue[bytes]") -> None:
@@ -90,6 +92,12 @@ class CodexClient:
         usage: dict[str, int] = {"input_tokens": 0, "output_tokens": 0}
 
         master_fd, slave_fd = pty.openpty()
+        attrs = termios.tcgetattr(slave_fd)
+        attrs[3] = attrs[3] & ~(
+            termios.ECHO | termios.ECHOE | termios.ECHOK | termios.ECHONL
+        )
+        termios.tcsetattr(slave_fd, termios.TCSANOW, attrs)
+
         proc = await asyncio.create_subprocess_exec(
             "codex",
             "app-server",
@@ -114,13 +122,18 @@ class CodexClient:
 
         reader_task = asyncio.create_task(read_master())
         line_reader = PtyLineReader(output_queue)
-        writer: Callable[[bytes], None] = lambda payload: os.write(master_fd, payload)
+
+        def writer(payload: bytes) -> None:
+            os.write(master_fd, payload)
 
         try:
             init_id = self._next_request_id()
-            await self._send_request(writer, init_id, "initialize", {
-                "clientInfo": {"name": "anthropic_bridge", "version": "1.0.0"}
-            })
+            await self._send_request(
+                writer,
+                init_id,
+                "initialize",
+                {"clientInfo": {"name": "anthropic_bridge", "version": "1.0.0"}},
+            )
             await self._read_response(line_reader, init_id)
             await self._send_notification(writer, "initialized", {})
 
@@ -134,7 +147,9 @@ class CodexClient:
             if self.reasoning_level:
                 thread_params["effort"] = self.reasoning_level
 
-            await self._send_request(writer, thread_id_req, "thread/start", thread_params)
+            await self._send_request(
+                writer, thread_id_req, "thread/start", thread_params
+            )
             thread_resp = await self._read_response(line_reader, thread_id_req)
             thread_id = thread_resp.get("result", {}).get("thread", {}).get("id")
 
@@ -144,10 +159,12 @@ class CodexClient:
             await self._read_until_method(line_reader, "thread/started")
 
             turn_id_req = self._next_request_id()
-            await self._send_request(writer, turn_id_req, "turn/start", {
-                "threadId": thread_id,
-                "input": [{"type": "text", "text": prompt}]
-            })
+            await self._send_request(
+                writer,
+                turn_id_req,
+                "turn/start",
+                {"threadId": thread_id, "input": [{"type": "text", "text": prompt}]},
+            )
 
             async for msg in self._read_notifications(line_reader):
                 method = msg.get("method", "")
@@ -163,12 +180,18 @@ class CodexClient:
                                     {
                                         "type": "content_block_delta",
                                         "index": thinking_idx,
-                                        "delta": {"type": "signature_delta", "signature": ""},
+                                        "delta": {
+                                            "type": "signature_delta",
+                                            "signature": "",
+                                        },
                                     },
                                 )
                                 yield self._sse(
                                     "content_block_stop",
-                                    {"type": "content_block_stop", "index": thinking_idx},
+                                    {
+                                        "type": "content_block_stop",
+                                        "index": thinking_idx,
+                                    },
                                 )
                                 thinking_started = False
 
@@ -238,12 +261,18 @@ class CodexClient:
                                     {
                                         "type": "content_block_delta",
                                         "index": thinking_idx,
-                                        "delta": {"type": "signature_delta", "signature": ""},
+                                        "delta": {
+                                            "type": "signature_delta",
+                                            "signature": "",
+                                        },
                                     },
                                 )
                                 yield self._sse(
                                     "content_block_stop",
-                                    {"type": "content_block_stop", "index": thinking_idx},
+                                    {
+                                        "type": "content_block_stop",
+                                        "index": thinking_idx,
+                                    },
                                 )
                                 thinking_started = False
                             text_idx = cur_idx
@@ -259,7 +288,11 @@ class CodexClient:
                             text_started = True
                         marker = self._tool_marker(
                             "START",
-                            {"id": tool_id, "name": "CodexCommand", "input": {"command": command}},
+                            {
+                                "id": tool_id,
+                                "name": "CodexCommand",
+                                "input": {"command": command},
+                            },
                         )
                         yield self._sse(
                             "content_block_delta",
@@ -295,7 +328,11 @@ class CodexClient:
                                 text_started = True
                             marker = self._tool_marker(
                                 "START",
-                                {"id": tool_id, "name": tool_name, "input": {"file_path": path}},
+                                {
+                                    "id": tool_id,
+                                    "name": tool_name,
+                                    "input": {"file_path": path},
+                                },
                             )
                             yield self._sse(
                                 "content_block_delta",
@@ -357,7 +394,11 @@ class CodexClient:
                             text_started = True
                         marker = self._tool_marker(
                             "START",
-                            {"id": tool_id, "name": "WebSearch", "input": {"query": query}},
+                            {
+                                "id": tool_id,
+                                "name": "WebSearch",
+                                "input": {"query": query},
+                            },
                         )
                         yield self._sse(
                             "content_block_delta",
@@ -393,7 +434,11 @@ class CodexClient:
                                 text_started = True
                             marker = self._tool_marker(
                                 "RESULT",
-                                {"id": tool_id, "output": output, "exit_code": exit_code},
+                                {
+                                    "id": tool_id,
+                                    "output": output,
+                                    "exit_code": exit_code,
+                                },
                             )
                             yield self._sse(
                                 "content_block_delta",
