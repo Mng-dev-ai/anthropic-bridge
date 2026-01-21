@@ -11,7 +11,7 @@ A proxy server that exposes an Anthropic Messages API-compatible endpoint while 
 - Support for multiple providers: Gemini, OpenAI, Grok, DeepSeek, Qwen, MiniMax
 - Extended thinking/reasoning support for compatible models
 - Reasoning cache for Gemini models across tool call rounds
-- **Codex CLI integration** - Use OpenAI's Codex models with your ChatGPT subscription
+- Codex CLI integration - Use OpenAI's Codex models with your ChatGPT subscription
 
 ## Installation
 
