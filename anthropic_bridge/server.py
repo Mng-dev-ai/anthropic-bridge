@@ -48,7 +48,7 @@ class AnthropicBridge:
             text = json.dumps(body)
             return JSONResponse({"input_tokens": len(text) // 4})
 
-        @self.app.post("/v1/messages")
+        @self.app.post("/v1/messages", response_model=None)
         async def messages(request: Request) -> StreamingResponse | JSONResponse:
             body = await request.json()
             model = body.get("model", "")

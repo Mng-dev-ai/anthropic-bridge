@@ -82,3 +82,10 @@ max-complexity = 10
 
 [tool.ruff.lint.isort]
 known-first-party = ["anthropic_bridge"]
+
+[dependency-groups]
+dev = [
+    "httpx>=0.28.1",
+    "pytest>=9.0.2",
+    "pytest-asyncio>=1.3.0",
+]
