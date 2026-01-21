@@ -84,7 +84,7 @@ class CodexClient:
             thread_id_req = self._next_request_id()
             thread_params: dict[str, Any] = {
                 "approvalPolicy": "never",
-                "sandbox": "dangerFullAccess",
+                "sandbox": "danger-full-access",
             }
             if self.target_model and self.target_model.lower() != "default":
                 thread_params["model"] = self.target_model
