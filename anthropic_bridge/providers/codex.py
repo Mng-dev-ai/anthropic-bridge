@@ -120,6 +120,8 @@ class CodexClient:
             async for msg in self._read_notifications(proc):
                 method = msg.get("method", "")
                 params = msg.get("params", {})
+                if method.startswith("item/"):
+                    logger.info("Codex event: %s at %s", method, time.time())
 
                 if method == "item/agentMessage/delta":
                     delta = params.get("delta", "")
