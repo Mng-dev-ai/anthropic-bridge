@@ -264,7 +264,33 @@ class CodexClient:
                     item_type = item.get("type", "")
                     text = item.get("text", "")
 
-                    if item_type == "command_execution":
+                    if item_type == "reasoning" and text:
+                        if not thinking_started:
+                            thinking_idx = cur_idx
+                            cur_idx += 1
+                            yield self._sse(
+                                "content_block_start",
+                                {
+                                    "type": "content_block_start",
+                                    "index": thinking_idx,
+                                    "content_block": {
+                                        "type": "thinking",
+                                        "thinking": "",
+                                        "signature": "",
+                                    },
+                                },
+                            )
+                            thinking_started = True
+                        yield self._sse(
+                            "content_block_delta",
+                            {
+                                "type": "content_block_delta",
+                                "index": thinking_idx,
+                                "delta": {"type": "thinking_delta", "thinking": text},
+                            },
+                        )
+
+                    elif item_type == "command_execution":
                         item_id = item.get("id", "")
                         if item_id in self._active_tools:
                             tool_id = self._active_tools.pop(item_id)
