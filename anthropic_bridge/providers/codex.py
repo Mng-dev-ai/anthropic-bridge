@@ -363,7 +363,8 @@ class CodexClient:
         elif item_type == "file_change":
             return "file_editor"
         elif item_type == "mcp_tool_call":
-            return item.get("name", "mcp_tool")
+            name = item.get("name")
+            return str(name) if name else "mcp_tool"
         return "unknown_tool"
 
     def _build_tool_input(self, item_type: str, item: dict[str, Any]) -> dict[str, Any]:
@@ -379,5 +380,6 @@ class CodexClient:
                 "action": item.get("action", "modify"),
             }
         elif item_type == "mcp_tool_call":
-            return item.get("arguments", {})
+            args = item.get("arguments")
+            return dict(args) if isinstance(args, dict) else {}
         return {}
