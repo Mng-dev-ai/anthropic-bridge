@@ -1,7 +1,9 @@
 import asyncio
+import contextlib
 import json
 import logging
 import random
+import shutil
 import string
 import time
 from collections.abc import AsyncIterator
@@ -64,15 +66,25 @@ class CodexClient:
         cur_idx = 0
         usage: dict[str, int] = {"input_tokens": 0, "output_tokens": 0}
 
+        cmd = ["codex", "app-server"]
+        if shutil.which("stdbuf"):
+            cmd = ["stdbuf", "-o0"] + cmd
+
         proc = await asyncio.create_subprocess_exec(
-            "codex", "app-server",
+            *cmd,
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
 
+        async def drain_stderr() -> None:
+            if proc.stderr:
+                async for line in proc.stderr:
+                    logger.debug("codex stderr: %s", line.decode(errors="replace").strip())
+
+        stderr_task = asyncio.create_task(drain_stderr())
+
         try:
-            # Initialize handshake
             init_id = self._next_request_id()
             await self._send_request(proc, init_id, "initialize", {
                 "clientInfo": {"name": "anthropic_bridge", "version": "1.0.0"}
@@ -80,7 +92,6 @@ class CodexClient:
             await self._read_response(proc, init_id)
             await self._send_notification(proc, "initialized", {})
 
-            # Start thread
             thread_id_req = self._next_request_id()
             thread_params: dict[str, Any] = {
                 "approvalPolicy": "never",
@@ -98,17 +109,14 @@ class CodexClient:
             if not thread_id:
                 raise RuntimeError(f"Failed to start thread: {thread_resp}")
 
-            # Read thread/started notification
             await self._read_until_method(proc, "thread/started")
 
-            # Start turn
             turn_id_req = self._next_request_id()
             await self._send_request(proc, turn_id_req, "turn/start", {
                 "threadId": thread_id,
                 "input": [{"type": "text", "text": prompt}]
             })
 
-            # Stream events until turn/completed
             async for msg in self._read_notifications(proc):
                 method = msg.get("method", "")
                 params = msg.get("params", {})
@@ -181,34 +189,6 @@ class CodexClient:
                                 "delta": {"type": "thinking_delta", "thinking": delta},
                             },
                         )
-
-                elif method == "item/commandExecution/outputDelta":
-                    item_id = params.get("itemId", "")
-                    delta = params.get("delta", "")
-                    if delta and item_id in self._active_tools:
-                        tool_id = self._active_tools[item_id]
-                        if not text_started:
-                            text_idx = cur_idx
-                            cur_idx += 1
-                            yield self._sse(
-                                "content_block_start",
-                                {
-                                    "type": "content_block_start",
-                                    "index": text_idx,
-                                    "content_block": {"type": "text", "text": ""},
-                                },
-                            )
-                            text_started = True
-                        marker = self._tool_marker("OUTPUT", {"id": tool_id, "delta": delta})
-                        yield self._sse(
-                            "content_block_delta",
-                            {
-                                "type": "content_block_delta",
-                                "index": text_idx,
-                                "delta": {"type": "text_delta", "text": marker},
-                            },
-                        )
-                        yield self._sse("ping", {"type": "ping"})
 
                 elif method == "item/started":
                     item = params.get("item", {})
@@ -509,6 +489,9 @@ class CodexClient:
                     )
 
         finally:
+            stderr_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await stderr_task
             if proc.returncode is None:
                 proc.terminate()
                 await proc.wait()
