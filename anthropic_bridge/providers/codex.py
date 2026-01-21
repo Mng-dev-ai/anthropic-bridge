@@ -22,10 +22,15 @@ class CodexClient:
             self.reasoning_level = None
         self._tool_counter = 0
         self._active_tools: dict[str, str] = {}
+        self._request_id = 0
 
     def _next_tool_id(self, prefix: str) -> str:
         self._tool_counter += 1
         return f"{prefix}_{self._tool_counter}_{self._random_id()}"
+
+    def _next_request_id(self) -> int:
+        self._request_id += 1
+        return self._request_id
 
     def _tool_marker(self, marker_type: str, payload: dict[str, Any]) -> str:
         return f"<!--CODEX_TOOL_{marker_type}:{json.dumps(payload)}-->"
@@ -59,65 +64,146 @@ class CodexClient:
         cur_idx = 0
         usage: dict[str, int] = {"input_tokens": 0, "output_tokens": 0}
 
-        cmd = [
-            "codex",
-            "exec",
-            "--json",
-            "--skip-git-repo-check",
-            "--dangerously-bypass-approvals-and-sandbox",
-            "-m",
-            self.target_model,
-        ]
-        if self.reasoning_level:
-            cmd.extend(["-c", f"reasoning_effort={self.reasoning_level}"])
-        cmd.append(prompt)
-
         proc = await asyncio.create_subprocess_exec(
-            *cmd,
+            "codex", "app-server",
+            stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
 
         try:
-            async for line in self._read_lines(proc.stdout):
-                if not line.strip():
-                    continue
+            # Initialize handshake
+            init_id = self._next_request_id()
+            await self._send_request(proc, init_id, "initialize", {
+                "clientInfo": {"name": "anthropic_bridge", "version": "1.0.0"}
+            })
+            await self._read_response(proc, init_id)
+            await self._send_notification(proc, "initialized", {})
 
-                try:
-                    event = json.loads(line)
-                except json.JSONDecodeError as e:
-                    logger.warning("Failed to parse Codex JSON line: %s", e)
-                    continue
+            # Start thread
+            thread_id_req = self._next_request_id()
+            thread_params: dict[str, Any] = {"approvalPolicy": "never"}
+            # Only set model if it's not "default" or empty
+            if self.target_model and self.target_model.lower() != "default":
+                thread_params["model"] = self.target_model
+            if self.reasoning_level:
+                thread_params["effort"] = self.reasoning_level
 
-                event_type = event.get("type", "")
+            await self._send_request(proc, thread_id_req, "thread/start", thread_params)
+            thread_resp = await self._read_response(proc, thread_id_req)
+            thread_id = thread_resp.get("result", {}).get("thread", {}).get("id")
 
-                if event_type == "item.started":
-                    item = event.get("item", {})
-                    item_type = item.get("type", "")
+            if not thread_id:
+                raise RuntimeError(f"Failed to start thread: {thread_resp}")
 
-                    if item_type == "reasoning" and not thinking_started:
-                        thinking_idx = cur_idx
-                        cur_idx += 1
-                        yield self._sse(
-                            "content_block_start",
-                            {
-                                "type": "content_block_start",
-                                "index": thinking_idx,
-                                "content_block": {
-                                    "type": "thinking",
-                                    "thinking": "",
-                                    "signature": "",
+            # Read thread/started notification
+            await self._read_until_method(proc, "thread/started")
+
+            # Start turn
+            turn_id_req = self._next_request_id()
+            await self._send_request(proc, turn_id_req, "turn/start", {
+                "threadId": thread_id,
+                "input": [{"type": "text", "text": prompt}]
+            })
+
+            # Stream events until turn/completed
+            async for msg in self._read_notifications(proc):
+                method = msg.get("method", "")
+                params = msg.get("params", {})
+
+                if method == "item/agentMessage/delta":
+                    delta = params.get("delta", "")
+                    if delta:
+                        if not text_started:
+                            if thinking_started:
+                                yield self._sse(
+                                    "content_block_delta",
+                                    {
+                                        "type": "content_block_delta",
+                                        "index": thinking_idx,
+                                        "delta": {"type": "signature_delta", "signature": ""},
+                                    },
+                                )
+                                yield self._sse(
+                                    "content_block_stop",
+                                    {"type": "content_block_stop", "index": thinking_idx},
+                                )
+                                thinking_started = False
+
+                            text_idx = cur_idx
+                            cur_idx += 1
+                            yield self._sse(
+                                "content_block_start",
+                                {
+                                    "type": "content_block_start",
+                                    "index": text_idx,
+                                    "content_block": {"type": "text", "text": ""},
                                 },
+                            )
+                            text_started = True
+
+                        yield self._sse(
+                            "content_block_delta",
+                            {
+                                "type": "content_block_delta",
+                                "index": text_idx,
+                                "delta": {"type": "text_delta", "text": delta},
                             },
                         )
-                        thinking_started = True
 
-                    elif item_type == "command_execution":
+                elif method == "item/reasoning/summaryTextDelta":
+                    delta = params.get("delta", "")
+                    if delta:
+                        if not thinking_started:
+                            thinking_idx = cur_idx
+                            cur_idx += 1
+                            yield self._sse(
+                                "content_block_start",
+                                {
+                                    "type": "content_block_start",
+                                    "index": thinking_idx,
+                                    "content_block": {
+                                        "type": "thinking",
+                                        "thinking": "",
+                                        "signature": "",
+                                    },
+                                },
+                            )
+                            thinking_started = True
+
+                        yield self._sse(
+                            "content_block_delta",
+                            {
+                                "type": "content_block_delta",
+                                "index": thinking_idx,
+                                "delta": {"type": "thinking_delta", "thinking": delta},
+                            },
+                        )
+
+                elif method == "item/started":
+                    item = params.get("item", {})
+                    item_type = item.get("type", "")
+                    item_id = item.get("id", "")
+
+                    if item_type == "commandExecution":
                         command = item.get("command", "")
-                        item_id = item.get("id", "")
                         tool_id = self._next_tool_id("codex_cmd")
                         self._active_tools[item_id] = tool_id
                         if not text_started:
+                            if thinking_started:
+                                yield self._sse(
+                                    "content_block_delta",
+                                    {
+                                        "type": "content_block_delta",
+                                        "index": thinking_idx,
+                                        "delta": {"type": "signature_delta", "signature": ""},
+                                    },
+                                )
+                                yield self._sse(
+                                    "content_block_stop",
+                                    {"type": "content_block_stop", "index": thinking_idx},
+                                )
+                                thinking_started = False
                             text_idx = cur_idx
                             cur_idx += 1
                             yield self._sse(
@@ -142,9 +228,43 @@ class CodexClient:
                             },
                         )
 
-                    elif item_type == "mcp_tool_call":
-                        item_id = item.get("id", "")
-                        tool_name = item.get("name", "mcp_tool")
+                    elif item_type == "fileChange":
+                        changes = item.get("changes", [])
+                        for change in changes:
+                            if not isinstance(change, dict):
+                                continue
+                            path = change.get("path", "")
+                            kind = change.get("kind", "update")
+                            tool_id = self._next_tool_id("codex_file")
+                            self._active_tools[f"{item_id}:{path}"] = tool_id
+                            tool_name = "Write" if kind == "add" else "Edit"
+                            if not text_started:
+                                text_idx = cur_idx
+                                cur_idx += 1
+                                yield self._sse(
+                                    "content_block_start",
+                                    {
+                                        "type": "content_block_start",
+                                        "index": text_idx,
+                                        "content_block": {"type": "text", "text": ""},
+                                    },
+                                )
+                                text_started = True
+                            marker = self._tool_marker(
+                                "START",
+                                {"id": tool_id, "name": tool_name, "input": {"file_path": path}},
+                            )
+                            yield self._sse(
+                                "content_block_delta",
+                                {
+                                    "type": "content_block_delta",
+                                    "index": text_idx,
+                                    "delta": {"type": "text_delta", "text": marker},
+                                },
+                            )
+
+                    elif item_type == "mcpToolCall":
+                        tool_name = item.get("tool", "mcp_tool")
                         args = item.get("arguments", {})
                         tool_id = self._next_tool_id("codex_mcp")
                         self._active_tools[item_id] = tool_id
@@ -160,8 +280,6 @@ class CodexClient:
                                 },
                             )
                             text_started = True
-                        if not isinstance(args, dict):
-                            logger.warning("MCP tool args is not a dict: %s", type(args))
                         mcp_input = dict(args) if isinstance(args, dict) else {}
                         marker = self._tool_marker(
                             "START",
@@ -176,8 +294,7 @@ class CodexClient:
                             },
                         )
 
-                    elif item_type == "web_search":
-                        item_id = item.get("id", "")
+                    elif item_type == "webSearch":
                         query = item.get("query", "")
                         tool_id = self._next_tool_id("codex_search")
                         self._active_tools[item_id] = tool_id
@@ -206,96 +323,16 @@ class CodexClient:
                             },
                         )
 
-                elif event_type == "item.updated":
-                    item = event.get("item", {})
+                elif method == "item/completed":
+                    item = params.get("item", {})
                     item_type = item.get("type", "")
-                    text = item.get("text", "")
+                    item_id = item.get("id", "")
 
-                    if item_type == "reasoning" and thinking_started and text:
-                        yield self._sse(
-                            "content_block_delta",
-                            {
-                                "type": "content_block_delta",
-                                "index": thinking_idx,
-                                "delta": {"type": "thinking_delta", "thinking": text},
-                            },
-                        )
-
-                    elif item_type == "agent_message" and text:
-                        if thinking_started:
-                            yield self._sse(
-                                "content_block_delta",
-                                {
-                                    "type": "content_block_delta",
-                                    "index": thinking_idx,
-                                    "delta": {"type": "signature_delta", "signature": ""},
-                                },
-                            )
-                            yield self._sse(
-                                "content_block_stop",
-                                {"type": "content_block_stop", "index": thinking_idx},
-                            )
-                            thinking_started = False
-
-                        if not text_started:
-                            text_idx = cur_idx
-                            cur_idx += 1
-                            yield self._sse(
-                                "content_block_start",
-                                {
-                                    "type": "content_block_start",
-                                    "index": text_idx,
-                                    "content_block": {"type": "text", "text": ""},
-                                },
-                            )
-                            text_started = True
-
-                        yield self._sse(
-                            "content_block_delta",
-                            {
-                                "type": "content_block_delta",
-                                "index": text_idx,
-                                "delta": {"type": "text_delta", "text": text},
-                            },
-                        )
-
-                elif event_type == "item.completed":
-                    item = event.get("item", {})
-                    item_type = item.get("type", "")
-                    text = item.get("text", "")
-
-                    if item_type == "reasoning" and text:
-                        if not thinking_started:
-                            thinking_idx = cur_idx
-                            cur_idx += 1
-                            yield self._sse(
-                                "content_block_start",
-                                {
-                                    "type": "content_block_start",
-                                    "index": thinking_idx,
-                                    "content_block": {
-                                        "type": "thinking",
-                                        "thinking": "",
-                                        "signature": "",
-                                    },
-                                },
-                            )
-                            thinking_started = True
-                        yield self._sse(
-                            "content_block_delta",
-                            {
-                                "type": "content_block_delta",
-                                "index": thinking_idx,
-                                "delta": {"type": "thinking_delta", "thinking": text},
-                            },
-                        )
-
-                    elif item_type == "command_execution":
-                        item_id = item.get("id", "")
+                    if item_type == "commandExecution":
                         if item_id in self._active_tools:
                             tool_id = self._active_tools.pop(item_id)
-                            output = item.get("aggregated_output", "")
-                            exit_code = item.get("exit_code", 0)
+                            output = item.get("aggregatedOutput", "")
+                            exit_code = item.get("exitCode", 0)
                             if not text_started:
                                 text_idx = cur_idx
                                 cur_idx += 1
@@ -321,48 +358,30 @@ class CodexClient:
                                 },
                             )
 
-                    elif item_type == "file_change":
-                        # file_change has changes array: [{"path": "...", "kind": "add|update|delete"}]
+                    elif item_type == "fileChange":
                         changes = item.get("changes", [])
                         for change in changes:
                             if not isinstance(change, dict):
                                 continue
                             path = change.get("path", "")
-                            kind = change.get("kind", "update")
-                            tool_id = self._next_tool_id("codex_file")
-                            # Map kind to existing tool: add → Write, update → Edit
-                            tool_name = "Write" if kind == "add" else "Edit"
-                            if not text_started:
-                                text_idx = cur_idx
-                                cur_idx += 1
+                            key = f"{item_id}:{path}"
+                            if key in self._active_tools:
+                                tool_id = self._active_tools.pop(key)
+                                marker = self._tool_marker("RESULT", {"id": tool_id})
                                 yield self._sse(
-                                    "content_block_start",
+                                    "content_block_delta",
                                     {
-                                        "type": "content_block_start",
+                                        "type": "content_block_delta",
                                         "index": text_idx,
-                                        "content_block": {"type": "text", "text": ""},
+                                        "delta": {"type": "text_delta", "text": marker},
                                     },
                                 )
-                                text_started = True
-                            start_marker = self._tool_marker(
-                                "START",
-                                {"id": tool_id, "name": tool_name, "input": {"file_path": path}},
-                            )
-                            result_marker = self._tool_marker("RESULT", {"id": tool_id})
-                            yield self._sse(
-                                "content_block_delta",
-                                {
-                                    "type": "content_block_delta",
-                                    "index": text_idx,
-                                    "delta": {"type": "text_delta", "text": start_marker + result_marker},
-                                },
-                            )
 
-                    elif item_type == "mcp_tool_call":
-                        item_id = item.get("id", "")
+                    elif item_type == "mcpToolCall":
                         if item_id in self._active_tools:
                             tool_id = self._active_tools.pop(item_id)
-                            output = item.get("aggregated_output", "")
+                            result = item.get("result", {})
+                            output = result.get("content", "") if result else ""
                             if not text_started:
                                 text_idx = cur_idx
                                 cur_idx += 1
@@ -388,11 +407,9 @@ class CodexClient:
                                 },
                             )
 
-                    elif item_type == "web_search":
-                        item_id = item.get("id", "")
+                    elif item_type == "webSearch":
                         if item_id in self._active_tools:
                             tool_id = self._active_tools.pop(item_id)
-                            results = item.get("results", [])
                             if not text_started:
                                 text_idx = cur_idx
                                 cur_idx += 1
@@ -407,7 +424,7 @@ class CodexClient:
                                 text_started = True
                             marker = self._tool_marker(
                                 "RESULT",
-                                {"id": tool_id, "output": results},
+                                {"id": tool_id, "output": "search completed"},
                             )
                             yield self._sse(
                                 "content_block_delta",
@@ -418,112 +435,18 @@ class CodexClient:
                                 },
                             )
 
-                    elif item_type == "view_image":
-                        path = item.get("path", "")
-                        tool_id = self._next_tool_id("codex_img")
-                        if not text_started:
-                            text_idx = cur_idx
-                            cur_idx += 1
-                            yield self._sse(
-                                "content_block_start",
-                                {
-                                    "type": "content_block_start",
-                                    "index": text_idx,
-                                    "content_block": {"type": "text", "text": ""},
-                                },
-                            )
-                            text_started = True
-                        start_marker = self._tool_marker(
-                            "START",
-                            {"id": tool_id, "name": "Read", "input": {"file_path": path}},
-                        )
-                        result_marker = self._tool_marker("RESULT", {"id": tool_id})
-                        yield self._sse(
-                            "content_block_delta",
-                            {
-                                "type": "content_block_delta",
-                                "index": text_idx,
-                                "delta": {"type": "text_delta", "text": start_marker + result_marker},
-                            },
-                        )
+                elif method == "turn/completed":
+                    turn = params.get("turn", {})
+                    # Extract usage from thread/tokenUsage/updated if available
+                    break
 
-                    elif item_type == "todo_list":
-                        items = item.get("items", [])
-                        tool_id = self._next_tool_id("codex_todo")
-                        if not text_started:
-                            text_idx = cur_idx
-                            cur_idx += 1
-                            yield self._sse(
-                                "content_block_start",
-                                {
-                                    "type": "content_block_start",
-                                    "index": text_idx,
-                                    "content_block": {"type": "text", "text": ""},
-                                },
-                            )
-                            text_started = True
-                        todo_items = list(items) if isinstance(items, list) else []
-                        start_marker = self._tool_marker(
-                            "START",
-                            {"id": tool_id, "name": "TodoWrite", "input": {"todos": todo_items}},
-                        )
-                        result_marker = self._tool_marker("RESULT", {"id": tool_id})
-                        yield self._sse(
-                            "content_block_delta",
-                            {
-                                "type": "content_block_delta",
-                                "index": text_idx,
-                                "delta": {"type": "text_delta", "text": start_marker + result_marker},
-                            },
-                        )
+                elif method == "thread/tokenUsage/updated":
+                    token_usage = params.get("tokenUsage", {})
+                    usage["input_tokens"] = token_usage.get("inputTokens", 0)
+                    usage["output_tokens"] = token_usage.get("outputTokens", 0)
 
-                    elif item_type == "agent_message" and text:
-                        if thinking_started:
-                            yield self._sse(
-                                "content_block_delta",
-                                {
-                                    "type": "content_block_delta",
-                                    "index": thinking_idx,
-                                    "delta": {"type": "signature_delta", "signature": ""},
-                                },
-                            )
-                            yield self._sse(
-                                "content_block_stop",
-                                {"type": "content_block_stop", "index": thinking_idx},
-                            )
-                            thinking_started = False
-
-                        if not text_started:
-                            text_idx = cur_idx
-                            cur_idx += 1
-                            yield self._sse(
-                                "content_block_start",
-                                {
-                                    "type": "content_block_start",
-                                    "index": text_idx,
-                                    "content_block": {"type": "text", "text": ""},
-                                },
-                            )
-                            text_started = True
-
-                        yield self._sse(
-                            "content_block_delta",
-                            {
-                                "type": "content_block_delta",
-                                "index": text_idx,
-                                "delta": {"type": "text_delta", "text": text},
-                            },
-                        )
-
-                elif event_type == "turn.completed":
-                    turn_usage = event.get("usage", {})
-                    usage["input_tokens"] = turn_usage.get("input_tokens", 0)
-                    usage["output_tokens"] = turn_usage.get("output_tokens", 0)
-
-                elif event_type == "error" or event_type == "turn.failed":
-                    error_msg = event.get("message") or event.get("error", {}).get(
-                        "message", "Unknown error"
-                    )
+                elif method == "error":
+                    error_msg = params.get("error", {}).get("message", "Unknown error")
                     if not text_started:
                         text_idx = cur_idx
                         cur_idx += 1
@@ -584,6 +507,89 @@ class CodexClient:
         yield self._sse("message_stop", {"type": "message_stop"})
         yield "data: [DONE]\n\n"
 
+    async def _send_request(
+        self,
+        proc: asyncio.subprocess.Process,
+        req_id: int,
+        method: str,
+        params: dict[str, Any],
+    ) -> None:
+        msg = {"method": method, "id": req_id, "params": params}
+        line = json.dumps(msg) + "\n"
+        if proc.stdin:
+            proc.stdin.write(line.encode())
+            await proc.stdin.drain()
+
+    async def _send_notification(
+        self,
+        proc: asyncio.subprocess.Process,
+        method: str,
+        params: dict[str, Any],
+    ) -> None:
+        msg = {"method": method, "params": params}
+        line = json.dumps(msg) + "\n"
+        if proc.stdin:
+            proc.stdin.write(line.encode())
+            await proc.stdin.drain()
+
+    async def _read_response(
+        self,
+        proc: asyncio.subprocess.Process,
+        expected_id: int,
+    ) -> dict[str, Any]:
+        if not proc.stdout:
+            return {}
+        while True:
+            line = await proc.stdout.readline()
+            if not line:
+                return {}
+            try:
+                msg = json.loads(line.decode())
+                if msg.get("id") == expected_id:
+                    return msg
+            except json.JSONDecodeError:
+                continue
+
+    async def _read_until_method(
+        self,
+        proc: asyncio.subprocess.Process,
+        target_method: str,
+    ) -> dict[str, Any]:
+        if not proc.stdout:
+            return {}
+        while True:
+            line = await proc.stdout.readline()
+            if not line:
+                return {}
+            try:
+                msg = json.loads(line.decode())
+                if msg.get("method") == target_method:
+                    return msg
+            except json.JSONDecodeError:
+                continue
+
+    async def _read_notifications(
+        self,
+        proc: asyncio.subprocess.Process,
+    ) -> AsyncIterator[dict[str, Any]]:
+        if not proc.stdout:
+            return
+        while True:
+            try:
+                line = await asyncio.wait_for(proc.stdout.readline(), timeout=300)
+                if not line:
+                    break
+                msg = json.loads(line.decode())
+                yield msg
+                if msg.get("method") == "turn/completed":
+                    break
+            except asyncio.TimeoutError:
+                logger.warning("Timeout waiting for Codex response")
+                break
+            except json.JSONDecodeError as e:
+                logger.warning("Failed to parse Codex JSON: %s", e)
+                continue
+
     def _extract_prompt(self, payload: dict[str, Any]) -> str:
         messages = payload.get("messages", [])
         system = payload.get("system", "")
@@ -615,18 +621,6 @@ class CodexClient:
                 parts.append(f"{role.capitalize()}: {content}")
 
         return "\n\n".join(parts)
-
-    async def _read_lines(
-        self, stream: asyncio.StreamReader | None
-    ) -> AsyncIterator[str]:
-        if stream is None:
-            return
-
-        while True:
-            line = await stream.readline()
-            if not line:
-                break
-            yield line.decode("utf-8", errors="replace")
 
     def _sse(self, event: str, data: dict[str, Any]) -> str:
         return f"event: {event}\ndata: {json.dumps(data)}\n\n"
