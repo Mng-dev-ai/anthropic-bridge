@@ -98,7 +98,6 @@ Append reasoning level suffix to control reasoning effort:
 | `codex/gpt-5.2-codex:high` | High reasoning effort |
 | `codex/gpt-5.2-codex:xhigh` | Extra high reasoning effort |
 | `codex/gpt-5.2` | GPT-5.2 base model |
-| `codex/o3` | O3 model |
 
 ## API Endpoints
 
@@ -129,7 +128,7 @@ Append reasoning level suffix to control reasoning effort:
 
 ### Codex CLI (via ChatGPT subscription)
 
-- **Codex** (`codex/*`) - GPT-5.2, GPT-5.2-Codex, O3 with reasoning levels
+- **Codex** (`codex/*`) - GPT-5.2, GPT-5.2-Codex with reasoning levels
 
 ### OpenRouter
 

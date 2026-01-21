@@ -54,7 +54,6 @@ class CodexClient:
             "--json",
             "--skip-git-repo-check",
             "--dangerously-bypass-approvals-and-sandbox",
-            "--search",
             "-m",
             self.target_model,
         ]
