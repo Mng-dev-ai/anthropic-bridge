@@ -82,8 +82,11 @@ class CodexClient:
 
             # Start thread
             thread_id_req = self._next_request_id()
-            thread_params: dict[str, Any] = {"approvalPolicy": "never"}
-            # Only set model if it's not "default" or empty
+            thread_params: dict[str, Any] = {
+                "approvalPolicy": "never",
+                # Use externalSandbox since we run in an already-sandboxed environment
+                "sandboxPolicy": {"type": "externalSandbox", "networkAccess": "enabled"},
+            }
             if self.target_model and self.target_model.lower() != "default":
                 thread_params["model"] = self.target_model
             if self.reasoning_level:
