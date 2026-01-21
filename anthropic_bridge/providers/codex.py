@@ -580,7 +580,7 @@ class CodexClient:
             if not line:
                 return {}
             try:
-                msg = json.loads(line.decode())
+                msg: dict[str, Any] = json.loads(line.decode())
                 if msg.get("id") == expected_id:
                     return msg
             except json.JSONDecodeError:
@@ -598,7 +598,7 @@ class CodexClient:
             if not line:
                 return {}
             try:
-                msg = json.loads(line.decode())
+                msg: dict[str, Any] = json.loads(line.decode())
                 if msg.get("method") == target_method:
                     return msg
             except json.JSONDecodeError:
