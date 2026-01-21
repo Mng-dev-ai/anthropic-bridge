@@ -100,6 +100,32 @@ class CodexClient:
                         )
                         thinking_started = True
 
+                    elif item_type == "command_execution":
+                        command = item.get("command", "")
+                        if not text_started:
+                            text_idx = cur_idx
+                            cur_idx += 1
+                            yield self._sse(
+                                "content_block_start",
+                                {
+                                    "type": "content_block_start",
+                                    "index": text_idx,
+                                    "content_block": {"type": "text", "text": ""},
+                                },
+                            )
+                            text_started = True
+                        yield self._sse(
+                            "content_block_delta",
+                            {
+                                "type": "content_block_delta",
+                                "index": text_idx,
+                                "delta": {
+                                    "type": "text_delta",
+                                    "text": f"\n🔧 Running: `{command}`\n",
+                                },
+                            },
+                        )
+
                 elif event_type == "item.updated":
                     item = event.get("item", {})
                     item_type = item.get("type", "")
@@ -158,7 +184,59 @@ class CodexClient:
                     item_type = item.get("type", "")
                     text = item.get("text", "")
 
-                    if item_type == "agent_message" and text:
+                    if item_type == "command_execution":
+                        output = item.get("aggregated_output", "")
+                        exit_code = item.get("exit_code", 0)
+                        if not text_started:
+                            text_idx = cur_idx
+                            cur_idx += 1
+                            yield self._sse(
+                                "content_block_start",
+                                {
+                                    "type": "content_block_start",
+                                    "index": text_idx,
+                                    "content_block": {"type": "text", "text": ""},
+                                },
+                            )
+                            text_started = True
+                        result_text = f"\n```\n{output}```\nExit code: {exit_code}\n\n"
+                        yield self._sse(
+                            "content_block_delta",
+                            {
+                                "type": "content_block_delta",
+                                "index": text_idx,
+                                "delta": {"type": "text_delta", "text": result_text},
+                            },
+                        )
+
+                    elif item_type == "file_change":
+                        path = item.get("path", "")
+                        action = item.get("action", "modified")
+                        if not text_started:
+                            text_idx = cur_idx
+                            cur_idx += 1
+                            yield self._sse(
+                                "content_block_start",
+                                {
+                                    "type": "content_block_start",
+                                    "index": text_idx,
+                                    "content_block": {"type": "text", "text": ""},
+                                },
+                            )
+                            text_started = True
+                        yield self._sse(
+                            "content_block_delta",
+                            {
+                                "type": "content_block_delta",
+                                "index": text_idx,
+                                "delta": {
+                                    "type": "text_delta",
+                                    "text": f"\n📝 File: `{path}` ({action})\n",
+                                },
+                            },
+                        )
+
+                    elif item_type == "agent_message" and text:
                         if thinking_started:
                             yield self._sse(
                                 "content_block_delta",
