@@ -2,6 +2,7 @@ import asyncio
 import json
 import logging
 import random
+import shlex
 import string
 import time
 from collections.abc import AsyncIterator
@@ -59,7 +60,7 @@ class CodexClient:
         cur_idx = 0
         usage: dict[str, int] = {"input_tokens": 0, "output_tokens": 0}
 
-        cmd = [
+        codex_args = [
             "codex",
             "exec",
             "--json",
@@ -69,8 +70,12 @@ class CodexClient:
             self.target_model,
         ]
         if self.reasoning_level:
-            cmd.extend(["-c", f"reasoning_effort={self.reasoning_level}"])
-        cmd.append(prompt)
+            codex_args.extend(["-c", f"reasoning_effort={self.reasoning_level}"])
+        codex_args.append(prompt)
+        # Codex CLI is a statically-linked Rust binary using musl, so stdbuf doesn't work.
+        # Use `script` to create a PTY, forcing line buffering instead of block buffering.
+        codex_cmd_str = " ".join(shlex.quote(arg) for arg in codex_args)
+        cmd = ["script", "-q", "-c", codex_cmd_str, "/dev/null"]
 
         proc = await asyncio.create_subprocess_exec(
             *cmd,
@@ -264,7 +269,33 @@ class CodexClient:
                     item_type = item.get("type", "")
                     text = item.get("text", "")
 
-                    if item_type == "command_execution":
+                    if item_type == "reasoning" and text:
+                        if not thinking_started:
+                            thinking_idx = cur_idx
+                            cur_idx += 1
+                            yield self._sse(
+                                "content_block_start",
+                                {
+                                    "type": "content_block_start",
+                                    "index": thinking_idx,
+                                    "content_block": {
+                                        "type": "thinking",
+                                        "thinking": "",
+                                        "signature": "",
+                                    },
+                                },
+                            )
+                            thinking_started = True
+                        yield self._sse(
+                            "content_block_delta",
+                            {
+                                "type": "content_block_delta",
+                                "index": thinking_idx,
+                                "delta": {"type": "thinking_delta", "thinking": text},
+                            },
+                        )
+
+                    elif item_type == "command_execution":
                         item_id = item.get("id", "")
                         if item_id in self._active_tools:
                             tool_id = self._active_tools.pop(item_id)
