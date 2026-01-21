@@ -1,16 +1,18 @@
 import asyncio
 import json
+import logging
 import random
 import string
 import time
 from collections.abc import AsyncIterator
 from typing import Any
 
+logger = logging.getLogger(__name__)
+
 
 class CodexClient:
     def __init__(self, target_model: str):
         model_str = target_model.removeprefix("codex/")
-        # Parse reasoning level suffix (e.g., "gpt-5.2-codex:high")
         if ":" in model_str:
             model, level = model_str.rsplit(":", 1)
             self.target_model = model
@@ -18,6 +20,15 @@ class CodexClient:
         else:
             self.target_model = model_str
             self.reasoning_level = None
+        self._tool_counter = 0
+        self._active_tools: dict[str, str] = {}
+
+    def _next_tool_id(self, prefix: str) -> str:
+        self._tool_counter += 1
+        return f"{prefix}_{self._tool_counter}_{self._random_id()}"
+
+    def _tool_marker(self, marker_type: str, payload: dict[str, Any]) -> str:
+        return f"<!--CODEX_TOOL_{marker_type}:{json.dumps(payload)}-->"
 
     async def handle(self, payload: dict[str, Any]) -> AsyncIterator[str]:
         prompt = self._extract_prompt(payload)
@@ -74,7 +85,8 @@ class CodexClient:
 
                 try:
                     event = json.loads(line)
-                except json.JSONDecodeError:
+                except json.JSONDecodeError as e:
+                    logger.warning("Failed to parse Codex JSON line: %s", e)
                     continue
 
                 event_type = event.get("type", "")
@@ -102,6 +114,9 @@ class CodexClient:
 
                     elif item_type == "command_execution":
                         command = item.get("command", "")
+                        item_id = item.get("id", "")
+                        tool_id = self._next_tool_id("codex_cmd")
+                        self._active_tools[item_id] = tool_id
                         if not text_started:
                             text_idx = cur_idx
                             cur_idx += 1
@@ -114,15 +129,80 @@ class CodexClient:
                                 },
                             )
                             text_started = True
+                        marker = self._tool_marker(
+                            "START",
+                            {"id": tool_id, "name": "CodexCommand", "input": {"command": command}},
+                        )
                         yield self._sse(
                             "content_block_delta",
                             {
                                 "type": "content_block_delta",
                                 "index": text_idx,
-                                "delta": {
-                                    "type": "text_delta",
-                                    "text": f"\n🔧 Running: `{command}`\n",
+                                "delta": {"type": "text_delta", "text": marker},
+                            },
+                        )
+
+                    elif item_type == "mcp_tool_call":
+                        item_id = item.get("id", "")
+                        tool_name = item.get("name", "mcp_tool")
+                        args = item.get("arguments", {})
+                        tool_id = self._next_tool_id("codex_mcp")
+                        self._active_tools[item_id] = tool_id
+                        if not text_started:
+                            text_idx = cur_idx
+                            cur_idx += 1
+                            yield self._sse(
+                                "content_block_start",
+                                {
+                                    "type": "content_block_start",
+                                    "index": text_idx,
+                                    "content_block": {"type": "text", "text": ""},
                                 },
+                            )
+                            text_started = True
+                        if not isinstance(args, dict):
+                            logger.warning("MCP tool args is not a dict: %s", type(args))
+                        mcp_input = dict(args) if isinstance(args, dict) else {}
+                        marker = self._tool_marker(
+                            "START",
+                            {"id": tool_id, "name": tool_name, "input": mcp_input},
+                        )
+                        yield self._sse(
+                            "content_block_delta",
+                            {
+                                "type": "content_block_delta",
+                                "index": text_idx,
+                                "delta": {"type": "text_delta", "text": marker},
+                            },
+                        )
+
+                    elif item_type == "web_search":
+                        item_id = item.get("id", "")
+                        query = item.get("query", "")
+                        tool_id = self._next_tool_id("codex_search")
+                        self._active_tools[item_id] = tool_id
+                        if not text_started:
+                            text_idx = cur_idx
+                            cur_idx += 1
+                            yield self._sse(
+                                "content_block_start",
+                                {
+                                    "type": "content_block_start",
+                                    "index": text_idx,
+                                    "content_block": {"type": "text", "text": ""},
+                                },
+                            )
+                            text_started = True
+                        marker = self._tool_marker(
+                            "START",
+                            {"id": tool_id, "name": "WebSearch", "input": {"query": query}},
+                        )
+                        yield self._sse(
+                            "content_block_delta",
+                            {
+                                "type": "content_block_delta",
+                                "index": text_idx,
+                                "delta": {"type": "text_delta", "text": marker},
                             },
                         )
 
@@ -185,8 +265,136 @@ class CodexClient:
                     text = item.get("text", "")
 
                     if item_type == "command_execution":
-                        output = item.get("aggregated_output", "")
-                        exit_code = item.get("exit_code", 0)
+                        item_id = item.get("id", "")
+                        if item_id in self._active_tools:
+                            tool_id = self._active_tools.pop(item_id)
+                            output = item.get("aggregated_output", "")
+                            exit_code = item.get("exit_code", 0)
+                            if not text_started:
+                                text_idx = cur_idx
+                                cur_idx += 1
+                                yield self._sse(
+                                    "content_block_start",
+                                    {
+                                        "type": "content_block_start",
+                                        "index": text_idx,
+                                        "content_block": {"type": "text", "text": ""},
+                                    },
+                                )
+                                text_started = True
+                            marker = self._tool_marker(
+                                "RESULT",
+                                {"id": tool_id, "output": output, "exit_code": exit_code},
+                            )
+                            yield self._sse(
+                                "content_block_delta",
+                                {
+                                    "type": "content_block_delta",
+                                    "index": text_idx,
+                                    "delta": {"type": "text_delta", "text": marker},
+                                },
+                            )
+
+                    elif item_type == "file_change":
+                        # file_change has changes array: [{"path": "...", "kind": "add|update|delete"}]
+                        changes = item.get("changes", [])
+                        for change in changes:
+                            if not isinstance(change, dict):
+                                continue
+                            path = change.get("path", "")
+                            kind = change.get("kind", "update")
+                            tool_id = self._next_tool_id("codex_file")
+                            # Map kind to existing tool: add → Write, update → Edit
+                            tool_name = "Write" if kind == "add" else "Edit"
+                            if not text_started:
+                                text_idx = cur_idx
+                                cur_idx += 1
+                                yield self._sse(
+                                    "content_block_start",
+                                    {
+                                        "type": "content_block_start",
+                                        "index": text_idx,
+                                        "content_block": {"type": "text", "text": ""},
+                                    },
+                                )
+                                text_started = True
+                            start_marker = self._tool_marker(
+                                "START",
+                                {"id": tool_id, "name": tool_name, "input": {"file_path": path}},
+                            )
+                            result_marker = self._tool_marker("RESULT", {"id": tool_id})
+                            yield self._sse(
+                                "content_block_delta",
+                                {
+                                    "type": "content_block_delta",
+                                    "index": text_idx,
+                                    "delta": {"type": "text_delta", "text": start_marker + result_marker},
+                                },
+                            )
+
+                    elif item_type == "mcp_tool_call":
+                        item_id = item.get("id", "")
+                        if item_id in self._active_tools:
+                            tool_id = self._active_tools.pop(item_id)
+                            output = item.get("aggregated_output", "")
+                            if not text_started:
+                                text_idx = cur_idx
+                                cur_idx += 1
+                                yield self._sse(
+                                    "content_block_start",
+                                    {
+                                        "type": "content_block_start",
+                                        "index": text_idx,
+                                        "content_block": {"type": "text", "text": ""},
+                                    },
+                                )
+                                text_started = True
+                            marker = self._tool_marker(
+                                "RESULT",
+                                {"id": tool_id, "output": output},
+                            )
+                            yield self._sse(
+                                "content_block_delta",
+                                {
+                                    "type": "content_block_delta",
+                                    "index": text_idx,
+                                    "delta": {"type": "text_delta", "text": marker},
+                                },
+                            )
+
+                    elif item_type == "web_search":
+                        item_id = item.get("id", "")
+                        if item_id in self._active_tools:
+                            tool_id = self._active_tools.pop(item_id)
+                            results = item.get("results", [])
+                            if not text_started:
+                                text_idx = cur_idx
+                                cur_idx += 1
+                                yield self._sse(
+                                    "content_block_start",
+                                    {
+                                        "type": "content_block_start",
+                                        "index": text_idx,
+                                        "content_block": {"type": "text", "text": ""},
+                                    },
+                                )
+                                text_started = True
+                            marker = self._tool_marker(
+                                "RESULT",
+                                {"id": tool_id, "output": results},
+                            )
+                            yield self._sse(
+                                "content_block_delta",
+                                {
+                                    "type": "content_block_delta",
+                                    "index": text_idx,
+                                    "delta": {"type": "text_delta", "text": marker},
+                                },
+                            )
+
+                    elif item_type == "view_image":
+                        path = item.get("path", "")
+                        tool_id = self._next_tool_id("codex_img")
                         if not text_started:
                             text_idx = cur_idx
                             cur_idx += 1
@@ -199,19 +407,23 @@ class CodexClient:
                                 },
                             )
                             text_started = True
-                        result_text = f"\n```\n{output}```\nExit code: {exit_code}\n\n"
+                        start_marker = self._tool_marker(
+                            "START",
+                            {"id": tool_id, "name": "Read", "input": {"file_path": path}},
+                        )
+                        result_marker = self._tool_marker("RESULT", {"id": tool_id})
                         yield self._sse(
                             "content_block_delta",
                             {
                                 "type": "content_block_delta",
                                 "index": text_idx,
-                                "delta": {"type": "text_delta", "text": result_text},
+                                "delta": {"type": "text_delta", "text": start_marker + result_marker},
                             },
                         )
 
-                    elif item_type == "file_change":
-                        path = item.get("path", "")
-                        action = item.get("action", "modified")
+                    elif item_type == "todo_list":
+                        items = item.get("items", [])
+                        tool_id = self._next_tool_id("codex_todo")
                         if not text_started:
                             text_idx = cur_idx
                             cur_idx += 1
@@ -224,15 +436,18 @@ class CodexClient:
                                 },
                             )
                             text_started = True
+                        todo_items = list(items) if isinstance(items, list) else []
+                        start_marker = self._tool_marker(
+                            "START",
+                            {"id": tool_id, "name": "TodoWrite", "input": {"todos": todo_items}},
+                        )
+                        result_marker = self._tool_marker("RESULT", {"id": tool_id})
                         yield self._sse(
                             "content_block_delta",
                             {
                                 "type": "content_block_delta",
                                 "index": text_idx,
-                                "delta": {
-                                    "type": "text_delta",
-                                    "text": f"\n📝 File: `{path}` ({action})\n",
-                                },
+                                "delta": {"type": "text_delta", "text": start_marker + result_marker},
                             },
                         )
 
