@@ -14,13 +14,15 @@ def main() -> None:
     args = parser.parse_args()
 
     api_key = os.environ.get("OPENROUTER_API_KEY", "")
-    if not api_key:
-        print("Error: OPENROUTER_API_KEY environment variable required")
-        raise SystemExit(1)
 
-    app = create_app(openrouter_api_key=api_key)
+    app = create_app(openrouter_api_key=api_key or None)
 
     print(f"Starting Anthropic Bridge on {args.host}:{args.port}")
+    print("  Codex CLI: codex/* models")
+    if api_key:
+        print("  OpenRouter: all other models")
+    else:
+        print("  OpenRouter: disabled (set OPENROUTER_API_KEY to enable)")
     uvicorn.run(app, host=args.host, port=args.port, log_level="info")
 
 
