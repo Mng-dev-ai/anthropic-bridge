@@ -474,8 +474,6 @@ class CodexClient:
                             yield self._sse("ping", {"type": "ping"})
 
                 elif method == "turn/completed":
-                    turn = params.get("turn", {})
-                    # Extract usage from thread/tokenUsage/updated if available
                     break
 
                 elif method == "thread/tokenUsage/updated":
