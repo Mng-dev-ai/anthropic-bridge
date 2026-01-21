@@ -1,6 +1,6 @@
 # anthropic-bridge
 
-A proxy server that exposes an Anthropic Messages API-compatible endpoint while routing requests to various LLM providers through OpenRouter.
+A proxy server that exposes an Anthropic Messages API-compatible endpoint while routing requests to various LLM providers through OpenRouter and Codex CLI.
 
 ## Features
 
@@ -11,6 +11,7 @@ A proxy server that exposes an Anthropic Messages API-compatible endpoint while 
 - Support for multiple providers: Gemini, OpenAI, Grok, DeepSeek, Qwen, MiniMax
 - Extended thinking/reasoning support for compatible models
 - Reasoning cache for Gemini models across tool call rounds
+- **Codex CLI integration** - Use OpenAI's Codex models with your ChatGPT subscription
 
 ## Installation
 
@@ -27,6 +28,8 @@ pip install -e ".[test,dev]"
 ```
 
 ## Usage
+
+### With OpenRouter
 
 Set your OpenRouter API key and start the server:
 
@@ -52,6 +55,51 @@ response = client.messages.create(
 )
 ```
 
+### With Codex CLI
+
+First, authenticate with Codex CLI using your ChatGPT subscription:
+
+```bash
+codex login
+```
+
+Then start the bridge (no API key needed for Codex models):
+
+```bash
+anthropic-bridge --port 8080
+```
+
+Use `codex/` prefixed models:
+
+```python
+from anthropic import Anthropic
+
+client = Anthropic(
+    api_key="not-used",
+    base_url="http://localhost:8080"
+)
+
+response = client.messages.create(
+    model="codex/gpt-5.2-codex",  # Codex model
+    max_tokens=1024,
+    messages=[{"role": "user", "content": "Hello!"}]
+)
+```
+
+#### Codex Models with Reasoning Levels
+
+Append reasoning level suffix to control reasoning effort:
+
+| Model | Description |
+|-------|-------------|
+| `codex/gpt-5.2-codex` | Default reasoning |
+| `codex/gpt-5.2-codex:low` | Low reasoning effort |
+| `codex/gpt-5.2-codex:medium` | Medium reasoning effort |
+| `codex/gpt-5.2-codex:high` | High reasoning effort |
+| `codex/gpt-5.2-codex:xhigh` | Extra high reasoning effort |
+| `codex/gpt-5.2` | GPT-5.2 base model |
+| `codex/o3` | O3 model |
+
 ## API Endpoints
 
 | Endpoint | Method | Description |
@@ -65,14 +113,25 @@ response = client.messages.create(
 
 | Environment Variable | Required | Description |
 |---------------------|----------|-------------|
-| `OPENROUTER_API_KEY` | Yes | Your OpenRouter API key |
+| `OPENROUTER_API_KEY` | No* | Your OpenRouter API key (*required for non-Codex models) |
 
 | CLI Flag | Default | Description |
 |----------|---------|-------------|
 | `--port` | 8080 | Port to run on |
 | `--host` | 127.0.0.1 | Host to bind to |
 
+### Model Routing
+
+- Models prefixed with `codex/` are routed to Codex CLI
+- All other models are routed to OpenRouter (requires `OPENROUTER_API_KEY`)
+
 ## Supported Models
+
+### Codex CLI (via ChatGPT subscription)
+
+- **Codex** (`codex/*`) - GPT-5.2, GPT-5.2-Codex, O3 with reasoning levels
+
+### OpenRouter
 
 Any model available on OpenRouter can be used. Provider-specific optimizations exist for:
 
