@@ -47,6 +47,7 @@ class CodexClient:
         thinking_idx = -1
         cur_idx = 0
         usage: dict[str, int] = {"input_tokens": 0, "output_tokens": 0}
+        tool_blocks: dict[str, int] = {}
 
         cmd = [
             "codex",
@@ -99,6 +100,26 @@ class CodexClient:
                             },
                         )
                         thinking_started = True
+
+                    elif item_type in ("command_execution", "file_change", "mcp_tool_call"):
+                        item_id = item.get("id", "")
+                        tool_idx = cur_idx
+                        cur_idx += 1
+                        tool_blocks[item_id] = tool_idx
+                        tool_name = self._get_tool_name(item_type, item)
+                        yield self._sse(
+                            "content_block_start",
+                            {
+                                "type": "content_block_start",
+                                "index": tool_idx,
+                                "content_block": {
+                                    "type": "tool_use",
+                                    "id": f"tool_{item_id or self._random_id()}",
+                                    "name": tool_name,
+                                    "input": {},
+                                },
+                            },
+                        )
 
                 elif event_type == "item.updated":
                     item = event.get("item", {})
@@ -156,9 +177,30 @@ class CodexClient:
                 elif event_type == "item.completed":
                     item = event.get("item", {})
                     item_type = item.get("type", "")
+                    item_id = item.get("id", "")
                     text = item.get("text", "")
 
-                    if item_type == "agent_message" and text:
+                    if item_type in ("command_execution", "file_change", "mcp_tool_call"):
+                        tool_idx = tool_blocks.get(item_id, -1)
+                        if tool_idx >= 0:
+                            tool_input = self._build_tool_input(item_type, item)
+                            yield self._sse(
+                                "content_block_delta",
+                                {
+                                    "type": "content_block_delta",
+                                    "index": tool_idx,
+                                    "delta": {
+                                        "type": "input_json_delta",
+                                        "partial_json": json.dumps(tool_input),
+                                    },
+                                },
+                            )
+                            yield self._sse(
+                                "content_block_stop",
+                                {"type": "content_block_stop", "index": tool_idx},
+                            )
+
+                    elif item_type == "agent_message" and text:
                         if thinking_started:
                             yield self._sse(
                                 "content_block_delta",
@@ -314,3 +356,30 @@ class CodexClient:
 
     def _random_id(self) -> str:
         return "".join(random.choices(string.ascii_lowercase + string.digits, k=12))
+
+    def _get_tool_name(self, item_type: str, item: dict[str, Any]) -> str:
+        if item_type == "command_execution":
+            return "bash"
+        elif item_type == "file_change":
+            return "file_editor"
+        elif item_type == "mcp_tool_call":
+            name = item.get("name")
+            return str(name) if name else "mcp_tool"
+        return "unknown_tool"
+
+    def _build_tool_input(self, item_type: str, item: dict[str, Any]) -> dict[str, Any]:
+        if item_type == "command_execution":
+            return {
+                "command": item.get("command", ""),
+                "output": item.get("aggregated_output", ""),
+                "exit_code": item.get("exit_code", 0),
+            }
+        elif item_type == "file_change":
+            return {
+                "path": item.get("path", ""),
+                "action": item.get("action", "modify"),
+            }
+        elif item_type == "mcp_tool_call":
+            args = item.get("arguments")
+            return dict(args) if isinstance(args, dict) else {}
+        return {}
