@@ -594,17 +594,7 @@ class CodexClient:
 
     def _extract_prompt(self, payload: dict[str, Any]) -> str:
         messages = payload.get("messages", [])
-        system = payload.get("system", "")
-
-        if isinstance(system, list):
-            system = "\n\n".join(
-                item.get("text", "") if isinstance(item, dict) else str(item)
-                for item in system
-            )
-
         parts: list[str] = []
-        if system:
-            parts.append(f"System: {system}")
 
         for msg in messages:
             role = msg.get("role", "user")
