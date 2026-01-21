@@ -182,6 +182,34 @@ class CodexClient:
                             },
                         )
 
+                elif method == "item/commandExecution/outputDelta":
+                    item_id = params.get("itemId", "")
+                    delta = params.get("delta", "")
+                    if delta and item_id in self._active_tools:
+                        tool_id = self._active_tools[item_id]
+                        if not text_started:
+                            text_idx = cur_idx
+                            cur_idx += 1
+                            yield self._sse(
+                                "content_block_start",
+                                {
+                                    "type": "content_block_start",
+                                    "index": text_idx,
+                                    "content_block": {"type": "text", "text": ""},
+                                },
+                            )
+                            text_started = True
+                        marker = self._tool_marker("OUTPUT", {"id": tool_id, "delta": delta})
+                        yield self._sse(
+                            "content_block_delta",
+                            {
+                                "type": "content_block_delta",
+                                "index": text_idx,
+                                "delta": {"type": "text_delta", "text": marker},
+                            },
+                        )
+                        yield self._sse("ping", {"type": "ping"})
+
                 elif method == "item/started":
                     item = params.get("item", {})
                     item_type = item.get("type", "")
@@ -229,6 +257,7 @@ class CodexClient:
                                 "delta": {"type": "text_delta", "text": marker},
                             },
                         )
+                        yield self._sse("ping", {"type": "ping"})
 
                     elif item_type == "fileChange":
                         changes = item.get("changes", [])
@@ -264,6 +293,7 @@ class CodexClient:
                                     "delta": {"type": "text_delta", "text": marker},
                                 },
                             )
+                            yield self._sse("ping", {"type": "ping"})
 
                     elif item_type == "mcpToolCall":
                         tool_name = item.get("tool", "mcp_tool")
@@ -295,6 +325,7 @@ class CodexClient:
                                 "delta": {"type": "text_delta", "text": marker},
                             },
                         )
+                        yield self._sse("ping", {"type": "ping"})
 
                     elif item_type == "webSearch":
                         query = item.get("query", "")
@@ -324,6 +355,7 @@ class CodexClient:
                                 "delta": {"type": "text_delta", "text": marker},
                             },
                         )
+                        yield self._sse("ping", {"type": "ping"})
 
                 elif method == "item/completed":
                     item = params.get("item", {})
@@ -359,6 +391,7 @@ class CodexClient:
                                     "delta": {"type": "text_delta", "text": marker},
                                 },
                             )
+                            yield self._sse("ping", {"type": "ping"})
 
                     elif item_type == "fileChange":
                         changes = item.get("changes", [])
@@ -378,6 +411,7 @@ class CodexClient:
                                         "delta": {"type": "text_delta", "text": marker},
                                     },
                                 )
+                                yield self._sse("ping", {"type": "ping"})
 
                     elif item_type == "mcpToolCall":
                         if item_id in self._active_tools:
@@ -408,6 +442,7 @@ class CodexClient:
                                     "delta": {"type": "text_delta", "text": marker},
                                 },
                             )
+                            yield self._sse("ping", {"type": "ping"})
 
                     elif item_type == "webSearch":
                         if item_id in self._active_tools:
@@ -436,6 +471,7 @@ class CodexClient:
                                     "delta": {"type": "text_delta", "text": marker},
                                 },
                             )
+                            yield self._sse("ping", {"type": "ping"})
 
                 elif method == "turn/completed":
                     turn = params.get("turn", {})
