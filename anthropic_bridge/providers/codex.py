@@ -37,6 +37,56 @@ class CodexClient:
     def _tool_marker(self, marker_type: str, payload: dict[str, Any]) -> str:
         return f"<!--CODEX_TOOL_{marker_type}:{json.dumps(payload)}-->"
 
+    def _emit_tool_use_block(
+        self, index: int, tool_id: str, name: str, input_data: dict[str, Any]
+    ) -> list[str]:
+        return [
+            self._sse(
+                "content_block_start",
+                {
+                    "type": "content_block_start",
+                    "index": index,
+                    "content_block": {
+                        "type": "tool_use",
+                        "id": tool_id,
+                        "name": name,
+                        "input": input_data,
+                    },
+                },
+            ),
+            self._sse(
+                "content_block_stop",
+                {"type": "content_block_stop", "index": index},
+            ),
+        ]
+
+    def _emit_tool_result_block(
+        self,
+        index: int,
+        tool_id: str,
+        content: Any = "",
+        is_error: bool = False,
+    ) -> list[str]:
+        return [
+            self._sse(
+                "content_block_start",
+                {
+                    "type": "content_block_start",
+                    "index": index,
+                    "content_block": {
+                        "type": "tool_result",
+                        "tool_use_id": tool_id,
+                        "content": content,
+                        "is_error": is_error,
+                    },
+                },
+            ),
+            self._sse(
+                "content_block_stop",
+                {"type": "content_block_stop", "index": index},
+            ),
+        ]
+
     async def handle(self, payload: dict[str, Any]) -> AsyncIterator[str]:
         prompt = self._extract_prompt(payload)
         msg_id = f"msg_{int(time.time())}_{self._random_id()}"
@@ -203,7 +253,181 @@ class CodexClient:
                         command = item.get("command", "")
                         tool_id = self._next_tool_id("codex_cmd")
                         self._active_tools[item_id] = tool_id
-                        if not text_started:
+                        if thinking_started:
+                            yield self._sse(
+                                "content_block_delta",
+                                {
+                                    "type": "content_block_delta",
+                                    "index": thinking_idx,
+                                    "delta": {
+                                        "type": "signature_delta",
+                                        "signature": "",
+                                    },
+                                },
+                            )
+                            yield self._sse(
+                                "content_block_stop",
+                                {
+                                    "type": "content_block_stop",
+                                    "index": thinking_idx,
+                                },
+                            )
+                            thinking_started = False
+                        if text_started:
+                            yield self._sse(
+                                "content_block_stop",
+                                {
+                                    "type": "content_block_stop",
+                                    "index": text_idx,
+                                },
+                            )
+                            text_started = False
+                        for event in self._emit_tool_use_block(
+                            cur_idx, tool_id, "Bash", {"command": command}
+                        ):
+                            yield event
+                        cur_idx += 1
+                        yield self._sse("ping", {"type": "ping"})
+
+                    elif item_type == "fileChange":
+                        changes = item.get("changes", [])
+                        closed_blocks = False
+                        for change in changes:
+                            if not isinstance(change, dict):
+                                continue
+                            path = change.get("path", "")
+                            key = f"{item_id}:{path}"
+                            if key in self._active_tools:
+                                tool_id = self._active_tools.pop(key)
+                                if not closed_blocks:
+                                    if thinking_started:
+                                        yield self._sse(
+                                            "content_block_delta",
+                                            {
+                                                "type": "content_block_delta",
+                                                "index": thinking_idx,
+                                                "delta": {
+                                                    "type": "signature_delta",
+                                                    "signature": "",
+                                                },
+                                            },
+                                        )
+                                        yield self._sse(
+                                            "content_block_stop",
+                                            {
+                                                "type": "content_block_stop",
+                                                "index": thinking_idx,
+                                            },
+                                        )
+                                        thinking_started = False
+                                    if text_started:
+                                        yield self._sse(
+                                            "content_block_stop",
+                                            {
+                                                "type": "content_block_stop",
+                                                "index": text_idx,
+                                            },
+                                        )
+                                        text_started = False
+                                    closed_blocks = True
+                                for event in self._emit_tool_result_block(
+                                    cur_idx, tool_id, ""
+                                ):
+                                    yield event
+                                cur_idx += 1
+                                yield self._sse("ping", {"type": "ping"})
+                    elif item_type == "mcpToolCall":
+                        tool_name = item.get("tool", "mcp_tool")
+                        args = item.get("arguments", {})
+                        tool_id = self._next_tool_id("codex_mcp")
+                        self._active_tools[item_id] = tool_id
+                        if thinking_started:
+                            yield self._sse(
+                                "content_block_delta",
+                                {
+                                    "type": "content_block_delta",
+                                    "index": thinking_idx,
+                                    "delta": {
+                                        "type": "signature_delta",
+                                        "signature": "",
+                                    },
+                                },
+                            )
+                            yield self._sse(
+                                "content_block_stop",
+                                {
+                                    "type": "content_block_stop",
+                                    "index": thinking_idx,
+                                },
+                            )
+                            thinking_started = False
+                        if text_started:
+                            yield self._sse(
+                                "content_block_stop",
+                                {
+                                    "type": "content_block_stop",
+                                    "index": text_idx,
+                                },
+                            )
+                            text_started = False
+                        mcp_input = dict(args) if isinstance(args, dict) else {}
+                        for event in self._emit_tool_use_block(
+                            cur_idx, tool_id, tool_name, mcp_input
+                        ):
+                            yield event
+                        cur_idx += 1
+                        yield self._sse("ping", {"type": "ping"})
+
+                    elif item_type == "webSearch":
+                        query = item.get("query", "")
+                        tool_id = self._next_tool_id("codex_search")
+                        self._active_tools[item_id] = tool_id
+                        if thinking_started:
+                            yield self._sse(
+                                "content_block_delta",
+                                {
+                                    "type": "content_block_delta",
+                                    "index": thinking_idx,
+                                    "delta": {
+                                        "type": "signature_delta",
+                                        "signature": "",
+                                    },
+                                },
+                            )
+                            yield self._sse(
+                                "content_block_stop",
+                                {
+                                    "type": "content_block_stop",
+                                    "index": thinking_idx,
+                                },
+                            )
+                            thinking_started = False
+                        if text_started:
+                            yield self._sse(
+                                "content_block_stop",
+                                {
+                                    "type": "content_block_stop",
+                                    "index": text_idx,
+                                },
+                            )
+                            text_started = False
+                        for event in self._emit_tool_use_block(
+                            cur_idx, tool_id, "WebSearch", {"query": query}
+                        ):
+                            yield event
+                        cur_idx += 1
+                        yield self._sse("ping", {"type": "ping"})
+
+                elif method == "item/completed":
+                    item = params.get("item", {})
+                    item_type = item.get("type", "")
+                    item_id = item.get("id", "")
+
+                    if item_type == "commandExecution":
+                        if item_id in self._active_tools:
+                            tool_id = self._active_tools.pop(item_id)
+                            output = item.get("aggregatedOutput", "")
+                            exit_code = item.get("exitCode", 0)
                             if thinking_started:
                                 yield self._sse(
                                     "content_block_delta",
@@ -224,183 +448,26 @@ class CodexClient:
                                     },
                                 )
                                 thinking_started = False
-                            text_idx = cur_idx
-                            cur_idx += 1
-                            yield self._sse(
-                                "content_block_start",
-                                {
-                                    "type": "content_block_start",
-                                    "index": text_idx,
-                                    "content_block": {"type": "text", "text": ""},
-                                },
-                            )
-                            text_started = True
-                        marker = self._tool_marker(
-                            "START",
-                            {
-                                "id": tool_id,
-                                "name": "CodexCommand",
-                                "input": {"command": command},
-                            },
-                        )
-                        yield self._sse(
-                            "content_block_delta",
-                            {
-                                "type": "content_block_delta",
-                                "index": text_idx,
-                                "delta": {"type": "text_delta", "text": marker},
-                            },
-                        )
-                        yield self._sse("ping", {"type": "ping"})
-
-                    elif item_type == "fileChange":
-                        changes = item.get("changes", [])
-                        for change in changes:
-                            if not isinstance(change, dict):
-                                continue
-                            path = change.get("path", "")
-                            kind = change.get("kind", "update")
-                            tool_id = self._next_tool_id("codex_file")
-                            self._active_tools[f"{item_id}:{path}"] = tool_id
-                            tool_name = "Write" if kind == "add" else "Edit"
-                            if not text_started:
-                                text_idx = cur_idx
-                                cur_idx += 1
+                            if text_started:
                                 yield self._sse(
-                                    "content_block_start",
+                                    "content_block_stop",
                                     {
-                                        "type": "content_block_start",
+                                        "type": "content_block_stop",
                                         "index": text_idx,
-                                        "content_block": {"type": "text", "text": ""},
                                     },
                                 )
-                                text_started = True
-                            marker = self._tool_marker(
-                                "START",
-                                {
-                                    "id": tool_id,
-                                    "name": tool_name,
-                                    "input": {"file_path": path},
-                                },
-                            )
-                            yield self._sse(
-                                "content_block_delta",
-                                {
-                                    "type": "content_block_delta",
-                                    "index": text_idx,
-                                    "delta": {"type": "text_delta", "text": marker},
-                                },
-                            )
-                            yield self._sse("ping", {"type": "ping"})
-
-                    elif item_type == "mcpToolCall":
-                        tool_name = item.get("tool", "mcp_tool")
-                        args = item.get("arguments", {})
-                        tool_id = self._next_tool_id("codex_mcp")
-                        self._active_tools[item_id] = tool_id
-                        if not text_started:
-                            text_idx = cur_idx
+                                text_started = False
+                            is_error = exit_code != 0
+                            for event in self._emit_tool_result_block(
+                                cur_idx, tool_id, output, is_error=is_error
+                            ):
+                                yield event
                             cur_idx += 1
-                            yield self._sse(
-                                "content_block_start",
-                                {
-                                    "type": "content_block_start",
-                                    "index": text_idx,
-                                    "content_block": {"type": "text", "text": ""},
-                                },
-                            )
-                            text_started = True
-                        mcp_input = dict(args) if isinstance(args, dict) else {}
-                        marker = self._tool_marker(
-                            "START",
-                            {"id": tool_id, "name": tool_name, "input": mcp_input},
-                        )
-                        yield self._sse(
-                            "content_block_delta",
-                            {
-                                "type": "content_block_delta",
-                                "index": text_idx,
-                                "delta": {"type": "text_delta", "text": marker},
-                            },
-                        )
-                        yield self._sse("ping", {"type": "ping"})
-
-                    elif item_type == "webSearch":
-                        query = item.get("query", "")
-                        tool_id = self._next_tool_id("codex_search")
-                        self._active_tools[item_id] = tool_id
-                        if not text_started:
-                            text_idx = cur_idx
-                            cur_idx += 1
-                            yield self._sse(
-                                "content_block_start",
-                                {
-                                    "type": "content_block_start",
-                                    "index": text_idx,
-                                    "content_block": {"type": "text", "text": ""},
-                                },
-                            )
-                            text_started = True
-                        marker = self._tool_marker(
-                            "START",
-                            {
-                                "id": tool_id,
-                                "name": "WebSearch",
-                                "input": {"query": query},
-                            },
-                        )
-                        yield self._sse(
-                            "content_block_delta",
-                            {
-                                "type": "content_block_delta",
-                                "index": text_idx,
-                                "delta": {"type": "text_delta", "text": marker},
-                            },
-                        )
-                        yield self._sse("ping", {"type": "ping"})
-
-                elif method == "item/completed":
-                    item = params.get("item", {})
-                    item_type = item.get("type", "")
-                    item_id = item.get("id", "")
-
-                    if item_type == "commandExecution":
-                        if item_id in self._active_tools:
-                            tool_id = self._active_tools.pop(item_id)
-                            output = item.get("aggregatedOutput", "")
-                            exit_code = item.get("exitCode", 0)
-                            if not text_started:
-                                text_idx = cur_idx
-                                cur_idx += 1
-                                yield self._sse(
-                                    "content_block_start",
-                                    {
-                                        "type": "content_block_start",
-                                        "index": text_idx,
-                                        "content_block": {"type": "text", "text": ""},
-                                    },
-                                )
-                                text_started = True
-                            marker = self._tool_marker(
-                                "RESULT",
-                                {
-                                    "id": tool_id,
-                                    "output": output,
-                                    "exit_code": exit_code,
-                                },
-                            )
-                            yield self._sse(
-                                "content_block_delta",
-                                {
-                                    "type": "content_block_delta",
-                                    "index": text_idx,
-                                    "delta": {"type": "text_delta", "text": marker},
-                                },
-                            )
                             yield self._sse("ping", {"type": "ping"})
 
                     elif item_type == "fileChange":
                         changes = item.get("changes", [])
+                        closed_blocks = False
                         for change in changes:
                             if not isinstance(change, dict):
                                 continue
@@ -408,15 +475,42 @@ class CodexClient:
                             key = f"{item_id}:{path}"
                             if key in self._active_tools:
                                 tool_id = self._active_tools.pop(key)
-                                marker = self._tool_marker("RESULT", {"id": tool_id})
-                                yield self._sse(
-                                    "content_block_delta",
-                                    {
-                                        "type": "content_block_delta",
-                                        "index": text_idx,
-                                        "delta": {"type": "text_delta", "text": marker},
-                                    },
-                                )
+                                if not closed_blocks:
+                                    if thinking_started:
+                                        yield self._sse(
+                                            "content_block_delta",
+                                            {
+                                                "type": "content_block_delta",
+                                                "index": thinking_idx,
+                                                "delta": {
+                                                    "type": "signature_delta",
+                                                    "signature": "",
+                                                },
+                                            },
+                                        )
+                                        yield self._sse(
+                                            "content_block_stop",
+                                            {
+                                                "type": "content_block_stop",
+                                                "index": thinking_idx,
+                                            },
+                                        )
+                                        thinking_started = False
+                                    if text_started:
+                                        yield self._sse(
+                                            "content_block_stop",
+                                            {
+                                                "type": "content_block_stop",
+                                                "index": text_idx,
+                                            },
+                                        )
+                                        text_started = False
+                                    closed_blocks = True
+                                for event in self._emit_tool_result_block(
+                                    cur_idx, tool_id, ""
+                                ):
+                                    yield event
+                                cur_idx += 1
                                 yield self._sse("ping", {"type": "ping"})
 
                     elif item_type == "mcpToolCall":
@@ -424,61 +518,80 @@ class CodexClient:
                             tool_id = self._active_tools.pop(item_id)
                             result = item.get("result", {})
                             output = result.get("content", "") if result else ""
-                            if not text_started:
-                                text_idx = cur_idx
-                                cur_idx += 1
+                            if thinking_started:
                                 yield self._sse(
-                                    "content_block_start",
+                                    "content_block_delta",
                                     {
-                                        "type": "content_block_start",
-                                        "index": text_idx,
-                                        "content_block": {"type": "text", "text": ""},
+                                        "type": "content_block_delta",
+                                        "index": thinking_idx,
+                                        "delta": {
+                                            "type": "signature_delta",
+                                            "signature": "",
+                                        },
                                     },
                                 )
-                                text_started = True
-                            marker = self._tool_marker(
-                                "RESULT",
-                                {"id": tool_id, "output": output},
-                            )
-                            yield self._sse(
-                                "content_block_delta",
-                                {
-                                    "type": "content_block_delta",
-                                    "index": text_idx,
-                                    "delta": {"type": "text_delta", "text": marker},
-                                },
-                            )
+                                yield self._sse(
+                                    "content_block_stop",
+                                    {
+                                        "type": "content_block_stop",
+                                        "index": thinking_idx,
+                                    },
+                                )
+                                thinking_started = False
+                            if text_started:
+                                yield self._sse(
+                                    "content_block_stop",
+                                    {
+                                        "type": "content_block_stop",
+                                        "index": text_idx,
+                                    },
+                                )
+                                text_started = False
+                            for event in self._emit_tool_result_block(
+                                cur_idx, tool_id, output
+                            ):
+                                yield event
+                            cur_idx += 1
                             yield self._sse("ping", {"type": "ping"})
 
                     elif item_type == "webSearch":
                         if item_id in self._active_tools:
                             tool_id = self._active_tools.pop(item_id)
-                            if not text_started:
-                                text_idx = cur_idx
-                                cur_idx += 1
+                            if thinking_started:
                                 yield self._sse(
-                                    "content_block_start",
+                                    "content_block_delta",
                                     {
-                                        "type": "content_block_start",
-                                        "index": text_idx,
-                                        "content_block": {"type": "text", "text": ""},
+                                        "type": "content_block_delta",
+                                        "index": thinking_idx,
+                                        "delta": {
+                                            "type": "signature_delta",
+                                            "signature": "",
+                                        },
                                     },
                                 )
-                                text_started = True
-                            marker = self._tool_marker(
-                                "RESULT",
-                                {"id": tool_id, "output": "search completed"},
-                            )
-                            yield self._sse(
-                                "content_block_delta",
-                                {
-                                    "type": "content_block_delta",
-                                    "index": text_idx,
-                                    "delta": {"type": "text_delta", "text": marker},
-                                },
-                            )
+                                yield self._sse(
+                                    "content_block_stop",
+                                    {
+                                        "type": "content_block_stop",
+                                        "index": thinking_idx,
+                                    },
+                                )
+                                thinking_started = False
+                            if text_started:
+                                yield self._sse(
+                                    "content_block_stop",
+                                    {
+                                        "type": "content_block_stop",
+                                        "index": text_idx,
+                                    },
+                                )
+                                text_started = False
+                            for event in self._emit_tool_result_block(
+                                cur_idx, tool_id, "search completed"
+                            ):
+                                yield event
+                            cur_idx += 1
                             yield self._sse("ping", {"type": "ping"})
-
                 elif method == "turn/completed":
                     break
 
