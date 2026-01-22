@@ -2,39 +2,13 @@ import asyncio
 import contextlib
 import json
 import logging
-import os
-import pty
 import random
 import string
-import termios
 import time
 from collections.abc import AsyncIterator
-from typing import Any, Callable
+from typing import Any
 
 logger = logging.getLogger(__name__)
-
-
-class PtyLineReader:
-    def __init__(self, queue: "asyncio.Queue[bytes]") -> None:
-        self._queue = queue
-        self._buffer = b""
-
-    async def readline(self) -> bytes:
-        while True:
-            newline = self._buffer.find(b"\n")
-            if newline != -1:
-                line = self._buffer[: newline + 1]
-                self._buffer = self._buffer[newline + 1 :]
-                return line
-
-            chunk = await self._queue.get()
-            if not chunk:
-                if self._buffer:
-                    line = self._buffer
-                    self._buffer = b""
-                    return line
-                return b""
-            self._buffer += chunk
 
 
 class CodexClient:
@@ -50,6 +24,7 @@ class CodexClient:
         self._tool_counter = 0
         self._active_tools: dict[str, str] = {}
         self._request_id = 0
+        self._proc: asyncio.subprocess.Process | None = None
 
     def _next_tool_id(self, prefix: str) -> str:
         self._tool_counter += 1
@@ -91,51 +66,25 @@ class CodexClient:
         cur_idx = 0
         usage: dict[str, int] = {"input_tokens": 0, "output_tokens": 0}
 
-        master_fd, slave_fd = pty.openpty()
-        attrs = termios.tcgetattr(slave_fd)
-        attrs[3] = attrs[3] & ~(
-            termios.ECHO | termios.ECHOE | termios.ECHOK | termios.ECHONL
-        )
-        termios.tcsetattr(slave_fd, termios.TCSANOW, attrs)
-
         proc = await asyncio.create_subprocess_exec(
             "codex",
             "app-server",
-            stdin=slave_fd,
-            stdout=slave_fd,
-            stderr=slave_fd,
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
         )
-        os.close(slave_fd)
-
-        output_queue: asyncio.Queue[bytes] = asyncio.Queue(maxsize=256)
-
-        async def read_master() -> None:
-            loop = asyncio.get_running_loop()
-            try:
-                while True:
-                    data = await loop.run_in_executor(None, os.read, master_fd, 4096)
-                    if not data:
-                        break
-                    await output_queue.put(data)
-            finally:
-                await output_queue.put(b"")
-
-        reader_task = asyncio.create_task(read_master())
-        line_reader = PtyLineReader(output_queue)
-
-        def writer(payload: bytes) -> None:
-            os.write(master_fd, payload)
+        self._proc = proc
 
         try:
             init_id = self._next_request_id()
             await self._send_request(
-                writer,
+                proc,
                 init_id,
                 "initialize",
                 {"clientInfo": {"name": "anthropic_bridge", "version": "1.0.0"}},
             )
-            await self._read_response(line_reader, init_id)
-            await self._send_notification(writer, "initialized", {})
+            await self._read_response(proc, init_id)
+            await self._send_notification(proc, "initialized", {})
 
             thread_id_req = self._next_request_id()
             thread_params: dict[str, Any] = {
@@ -148,25 +97,25 @@ class CodexClient:
                 thread_params["effort"] = self.reasoning_level
 
             await self._send_request(
-                writer, thread_id_req, "thread/start", thread_params
+                proc, thread_id_req, "thread/start", thread_params
             )
-            thread_resp = await self._read_response(line_reader, thread_id_req)
+            thread_resp = await self._read_response(proc, thread_id_req)
             thread_id = thread_resp.get("result", {}).get("thread", {}).get("id")
 
             if not thread_id:
                 raise RuntimeError(f"Failed to start thread: {thread_resp}")
 
-            await self._read_until_method(line_reader, "thread/started")
+            await self._read_until_method(proc, "thread/started")
 
             turn_id_req = self._next_request_id()
             await self._send_request(
-                writer,
+                proc,
                 turn_id_req,
                 "turn/start",
                 {"threadId": thread_id, "input": [{"type": "text", "text": prompt}]},
             )
 
-            async for msg in self._read_notifications(line_reader):
+            async for msg in self._read_notifications(proc):
                 method = msg.get("method", "")
                 params = msg.get("params", {})
 
@@ -566,14 +515,11 @@ class CodexClient:
                     )
 
         finally:
-            reader_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await reader_task
-            with contextlib.suppress(OSError):
-                os.close(master_fd)
+            self._proc = None
             if proc.returncode is None:
                 proc.terminate()
-                await proc.wait()
+                with contextlib.suppress(Exception):
+                    await asyncio.wait_for(proc.wait(), timeout=5)
 
         if thinking_started:
             yield self._sse(
@@ -607,32 +553,42 @@ class CodexClient:
 
     async def _send_request(
         self,
-        write_fn: Callable[[bytes], None],
+        proc: asyncio.subprocess.Process,
         req_id: int,
         method: str,
         params: dict[str, Any],
     ) -> None:
         msg = {"method": method, "id": req_id, "params": params}
         line = json.dumps(msg) + "\n"
-        await asyncio.to_thread(write_fn, line.encode())
+        proc.stdin.write(line.encode())
+        await proc.stdin.drain()
 
     async def _send_notification(
         self,
-        write_fn: Callable[[bytes], None],
+        proc: asyncio.subprocess.Process,
         method: str,
         params: dict[str, Any],
     ) -> None:
         msg = {"method": method, "params": params}
         line = json.dumps(msg) + "\n"
-        await asyncio.to_thread(write_fn, line.encode())
+        proc.stdin.write(line.encode())
+        await proc.stdin.drain()
+
+    async def _read_line(
+        self, proc: asyncio.subprocess.Process, timeout: float = 300
+    ) -> bytes:
+        try:
+            return await asyncio.wait_for(proc.stdout.readline(), timeout=timeout)
+        except asyncio.TimeoutError:
+            return b""
 
     async def _read_response(
         self,
-        reader: PtyLineReader,
+        proc: asyncio.subprocess.Process,
         expected_id: int,
     ) -> dict[str, Any]:
         while True:
-            line = await reader.readline()
+            line = await self._read_line(proc)
             if not line:
                 return {}
             try:
@@ -644,11 +600,11 @@ class CodexClient:
 
     async def _read_until_method(
         self,
-        reader: PtyLineReader,
+        proc: asyncio.subprocess.Process,
         target_method: str,
     ) -> dict[str, Any]:
         while True:
-            line = await reader.readline()
+            line = await self._read_line(proc)
             if not line:
                 return {}
             try:
@@ -660,11 +616,11 @@ class CodexClient:
 
     async def _read_notifications(
         self,
-        reader: PtyLineReader,
+        proc: asyncio.subprocess.Process,
     ) -> AsyncIterator[dict[str, Any]]:
         while True:
             try:
-                line = await asyncio.wait_for(reader.readline(), timeout=300)
+                line = await self._read_line(proc, timeout=300)
                 if not line:
                     break
                 msg = json.loads(line.decode())
