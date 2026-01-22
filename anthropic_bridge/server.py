@@ -6,8 +6,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from .cache import get_reasoning_cache
-from .client import OpenRouterClient
-from .providers.codex import CodexClient
+from .providers import OpenAIProvider, OpenRouterProvider
 
 
 @dataclass
@@ -19,8 +18,8 @@ class AnthropicBridge:
     def __init__(self, config: ProxyConfig):
         self.config = config
         self.app = FastAPI(title="Anthropic Bridge")
-        self._clients: dict[str, OpenRouterClient] = {}
-        self._codex_clients: dict[str, CodexClient] = {}
+        self._openrouter_clients: dict[str, OpenRouterProvider] = {}
+        self._openai_clients: dict[str, OpenAIProvider] = {}
         self._setup_routes()
         self._setup_cors()
         get_reasoning_cache()
@@ -53,42 +52,47 @@ class AnthropicBridge:
             body = await request.json()
             model = body.get("model", "")
 
-            if self._should_use_codex(model):
-                handler = self._get_codex_client(model).handle(body)
-            elif not self.config.openrouter_api_key:
+            provider = self._get_provider(model)
+            if provider is None:
+                if model.startswith("openrouter/"):
+                    error_msg = f"OPENROUTER_API_KEY required for model '{model}'."
+                else:
+                    error_msg = (
+                        f"Unknown model prefix '{model}'. "
+                        "Use openai/* or openrouter/* models."
+                    )
                 return JSONResponse(
                     status_code=401,
                     content={
                         "error": {
                             "type": "authentication_error",
-                            "message": f"OPENROUTER_API_KEY required for model '{model}'. "
-                            "Use codex/* models or set the API key.",
+                            "message": error_msg,
                         }
                     },
                 )
-            else:
-                handler = self._get_client(model).handle(body)
 
             return StreamingResponse(
-                handler,
+                provider.handle(body),
                 media_type="text/event-stream",
                 headers={"Cache-Control": "no-cache", "Connection": "keep-alive"},
             )
 
-    def _should_use_codex(self, model: str) -> bool:
-        return model.startswith("codex/")
+    def _get_provider(self, model: str) -> OpenAIProvider | OpenRouterProvider | None:
+        if model.startswith("openai/"):
+            if model not in self._openai_clients:
+                self._openai_clients[model] = OpenAIProvider(model)
+            return self._openai_clients[model]
 
-    def _get_codex_client(self, model: str) -> CodexClient:
-        if model not in self._codex_clients:
-            self._codex_clients[model] = CodexClient(model)
-        return self._codex_clients[model]
+        if model.startswith("openrouter/"):
+            if not self.config.openrouter_api_key:
+                return None
+            if model not in self._openrouter_clients:
+                self._openrouter_clients[model] = OpenRouterProvider(
+                    model, self.config.openrouter_api_key
+                )
+            return self._openrouter_clients[model]
 
-    def _get_client(self, model: str) -> OpenRouterClient:
-        if model not in self._clients:
-            self._clients[model] = OpenRouterClient(
-                model, self.config.openrouter_api_key or ""
-            )
-        return self._clients[model]
+        return None
 
 
 def create_app(openrouter_api_key: str | None = None) -> FastAPI:

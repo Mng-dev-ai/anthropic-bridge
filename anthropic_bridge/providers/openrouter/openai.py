@@ -1,9 +1,10 @@
 from typing import Any
 
+from ..utils import map_reasoning_effort
 from .base import BaseProvider, ProviderResult
 
 
-class GeminiProvider(BaseProvider):
+class OpenRouterOpenAIProvider(BaseProvider):
     def process_text_content(
         self, text_content: str, accumulated_text: str
     ) -> ProviderResult:
@@ -14,17 +15,15 @@ class GeminiProvider(BaseProvider):
     ) -> dict[str, Any]:
         if original_request.get("thinking"):
             budget = original_request["thinking"].get("budget_tokens", 0)
-            if "gemini-3" in self.model_id.lower():
-                # Gemini 3 uses thinking_level: low/high
-                request["thinking_level"] = "high" if budget >= 16000 else "low"
-            else:
-                # Gemini 2.x uses thinking_budget directly (capped at 24k)
-                request["thinking_budget"] = min(budget, 24000)
+            effort = map_reasoning_effort(budget, request.get("model"))
+            if effort:
+                request["reasoning_effort"] = effort
             request.pop("thinking", None)
         return request
 
     def should_handle(self, model_id: str) -> bool:
-        return "gemini" in model_id.lower() or "google/" in model_id.lower()
+        lower = model_id.lower()
+        return "openai/" in lower or lower.startswith("o1") or lower.startswith("o3")
 
     def get_name(self) -> str:
-        return "GeminiProvider"
+        return "OpenRouterOpenAIProvider"

@@ -5,10 +5,16 @@ from typing import Any
 import pytest
 from httpx import ASGITransport, AsyncClient
 
+from anthropic_bridge.providers.openai.auth import auth_file_exists
 from anthropic_bridge.server import create_app
 
-GEMINI_MODEL = "google/gemini-3-pro-preview"
-OPENAI_MODEL = "openai/gpt-5.1-codex"
+skip_openai = pytest.mark.skipif(
+    not auth_file_exists(),
+    reason="OpenAI auth file not found (~/.codex/auth.json)",
+)
+
+GEMINI_MODEL = "openrouter/google/gemini-3-pro-preview"
+OPENAI_MODEL = "openai/gpt-5.2"
 
 WEATHER_TOOL = {
     "name": "get_weather",
@@ -161,6 +167,7 @@ class TestMultiRoundStreaming:
             text3 = extract_text_from_events(events)
             assert len(text3) > 0
 
+    @skip_openai
     @pytest.mark.asyncio
     async def test_multi_round_conversation_openai(self, app):
         transport = ASGITransport(app=app)
@@ -295,6 +302,7 @@ class TestMultiRoundToolCalls:
             text3 = extract_text_from_events(events)
             assert len(text3) > 0
 
+    @skip_openai
     @pytest.mark.asyncio
     async def test_multi_round_tool_calls_openai(self, app):
         transport = ASGITransport(app=app)
@@ -375,6 +383,7 @@ class TestMultiRoundToolCalls:
 
 
 class TestModelSwitching:
+    @skip_openai
     @pytest.mark.asyncio
     async def test_switch_between_models(self, app):
         transport = ASGITransport(app=app)
@@ -450,6 +459,7 @@ class TestSSEStreamStructure:
             assert "message" in msg_start
             assert msg_start["message"]["role"] == "assistant"
 
+    @skip_openai
     @pytest.mark.asyncio
     async def test_tool_call_sse_structure(self, app):
         transport = ASGITransport(app=app)

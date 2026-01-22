@@ -12,7 +12,6 @@ class DeepSeekProvider(BaseProvider):
     def prepare_request(
         self, request: dict[str, Any], original_request: dict[str, Any]
     ) -> dict[str, Any]:
-        # DeepSeek R1 auto-manages reasoning, strip thinking params to avoid API errors
         request.pop("thinking", None)
         return request
 

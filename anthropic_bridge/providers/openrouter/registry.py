@@ -3,7 +3,7 @@ from .deepseek import DeepSeekProvider
 from .gemini import GeminiProvider
 from .grok import GrokProvider
 from .minimax import MiniMaxProvider
-from .openai import OpenAIProvider
+from .openai import OpenRouterOpenAIProvider
 from .qwen import QwenProvider
 
 
@@ -13,7 +13,7 @@ class ProviderRegistry:
         self._providers: list[BaseProvider] = [
             GrokProvider(model_id),
             GeminiProvider(model_id),
-            OpenAIProvider(model_id),
+            OpenRouterOpenAIProvider(model_id),
             QwenProvider(model_id),
             MiniMaxProvider(model_id),
             DeepSeekProvider(model_id),

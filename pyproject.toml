@@ -1,13 +1,14 @@
 [project]
 name = "anthropic-bridge"
-version = "0.1.19"
-description = "Bridge Anthropic API to OpenRouter models"
+version = "0.1.20"
+description = "Bridge Anthropic API to OpenRouter and OpenAI models."
 license = "MIT"
 requires-python = ">=3.11"
 dependencies = [
     "fastapi>=0.115.0",
     "uvicorn>=0.32.0",
     "httpx>=0.28.0",
+    "openai>=2.15.0",
 ]
 
 [project.optional-dependencies]
