@@ -7,13 +7,13 @@ from typing import Any
 
 import httpx
 
-from .cache import get_reasoning_cache
-from .providers import ProviderRegistry
-from .transform import (
+from ...cache import get_reasoning_cache
+from ...transform import (
     convert_anthropic_messages_to_openai,
     convert_anthropic_tool_choice_to_openai,
     convert_anthropic_tools_to_openai,
 )
+from .registry import ProviderRegistry
 
 OPENROUTER_API_URL = "https://openrouter.ai/api/v1/chat/completions"
 OPENROUTER_HEADERS = {
@@ -22,11 +22,11 @@ OPENROUTER_HEADERS = {
 }
 
 
-class OpenRouterClient:
+class OpenRouterProvider:
     def __init__(self, target_model: str, api_key: str):
-        self.target_model = target_model
+        self.target_model = target_model.removeprefix("openrouter/")
         self.api_key = api_key
-        self.provider_registry = ProviderRegistry(target_model)
+        self.provider_registry = ProviderRegistry(self.target_model)
         self._is_gemini = (
             "gemini" in target_model.lower() or "google/" in target_model.lower()
         )

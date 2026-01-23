@@ -18,9 +18,9 @@ def main() -> None:
     app = create_app(openrouter_api_key=api_key or None)
 
     print(f"Starting Anthropic Bridge on {args.host}:{args.port}")
-    print("  Codex CLI: codex/* models")
+    print("  OpenAI: openai/* models")
     if api_key:
-        print("  OpenRouter: all other models")
+        print("  OpenRouter: openrouter/* models")
     else:
         print("  OpenRouter: disabled (set OPENROUTER_API_KEY to enable)")
     uvicorn.run(app, host=args.host, port=args.port, log_level="info")

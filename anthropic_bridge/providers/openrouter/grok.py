@@ -55,7 +55,6 @@ class GrokProvider(BaseProvider):
         self, request: dict[str, Any], original_request: dict[str, Any]
     ) -> dict[str, Any]:
         if original_request.get("thinking"):
-            # only Grok 3 Mini supports reasoning_effort
             if "mini" in self.model_id.lower():
                 budget = original_request["thinking"].get("budget_tokens", 0)
                 request["reasoning_effort"] = "high" if budget >= 20000 else "low"

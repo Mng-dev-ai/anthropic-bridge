@@ -13,7 +13,7 @@ class MiniMaxProvider(BaseProvider):
         self, request: dict[str, Any], original_request: dict[str, Any]
     ) -> dict[str, Any]:
         if original_request.get("thinking"):
-            request["reasoning_split"] = True  # interleaved thinking
+            request["reasoning_split"] = True
             request.pop("thinking", None)
         return request
 
