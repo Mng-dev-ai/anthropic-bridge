@@ -137,7 +137,8 @@ class OpenRouterProvider:
         thinking_started = False
         thinking_idx = -1
         cur_idx = 0
-        tools: dict[int, dict[str, Any]] = {}
+        saw_tool_use = False
+        tools: dict[object, dict[str, Any]] = {}
         usage: dict[str, Any] | None = None
         current_reasoning_details: list[dict[str, Any]] = []
 
@@ -281,6 +282,7 @@ class OpenRouterProvider:
                                 )
                                 text_started = False
 
+                            saw_tool_use = True
                             tool_idx = cur_idx
                             cur_idx += 1
                             yield self._sse(
@@ -317,8 +319,13 @@ class OpenRouterProvider:
 
                     tool_calls = delta.get("tool_calls", [])
                     for tc in tool_calls:
-                        idx = tc.get("index", 0)
-                        if idx not in tools:
+                        key: object
+                        if "index" in tc:
+                            key = tc["index"]
+                        else:
+                            key = tc.get("id") or f"tool_{int(time.time())}_{self._random_id()}"
+
+                        if key not in tools:
                             if text_started:
                                 yield self._sse(
                                     "content_block_stop",
@@ -326,16 +333,17 @@ class OpenRouterProvider:
                                 )
                                 text_started = False
 
-                            tools[idx] = {
-                                "id": tc.get("id") or f"tool_{int(time.time())}_{idx}",
+                            tools[key] = {
+                                "id": tc.get("id") or f"tool_{int(time.time())}",
                                 "name": tc.get("function", {}).get("name", ""),
                                 "block_idx": cur_idx,
                                 "started": False,
                                 "closed": False,
                             }
                             cur_idx += 1
+                            saw_tool_use = True
 
-                        t = tools[idx]
+                        t = tools[key]
                         fn = tc.get("function", {})
 
                         if fn.get("name") and not t["started"]:
@@ -416,7 +424,10 @@ class OpenRouterProvider:
             "message_delta",
             {
                 "type": "message_delta",
-                "delta": {"stop_reason": "end_turn", "stop_sequence": None},
+                "delta": {
+                    "stop_reason": "tool_use" if saw_tool_use else "end_turn",
+                    "stop_sequence": None,
+                },
                 "usage": {
                     "input_tokens": usage.get("prompt_tokens", 0) if usage else 0,
                     "output_tokens": usage.get("completion_tokens", 0) if usage else 0,

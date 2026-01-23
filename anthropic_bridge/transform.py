@@ -156,7 +156,6 @@ def convert_anthropic_messages_to_openai(
         if role == "user":
             if isinstance(content, list):
                 content_parts: list[dict[str, Any]] = []
-                tool_results: list[dict[str, Any]] = []
                 seen_tool_ids: set[str] = set()
 
                 for block in content:
@@ -178,11 +177,14 @@ def convert_anthropic_messages_to_openai(
                     elif block_type == "tool_result":
                         tool_id = block.get("tool_use_id")
                         if tool_id and tool_id not in seen_tool_ids:
+                            if content_parts:
+                                openai_messages.append({"role": "user", "content": list(content_parts)})
+                                content_parts.clear()
                             seen_tool_ids.add(tool_id)
                             result_content = block.get("content", "")
                             if not isinstance(result_content, str):
                                 result_content = json.dumps(result_content)
-                            tool_results.append(
+                            openai_messages.append(
                                 {
                                     "role": "tool",
                                     "content": result_content,
@@ -190,7 +192,6 @@ def convert_anthropic_messages_to_openai(
                                 }
                             )
 
-                openai_messages.extend(tool_results)
                 if content_parts:
                     openai_messages.append({"role": "user", "content": content_parts})
             else:

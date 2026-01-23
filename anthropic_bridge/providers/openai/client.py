@@ -74,26 +74,37 @@ class OpenAIProvider:
             if isinstance(content, str):
                 input_messages.append({"role": role, "content": content})
             elif isinstance(content, list):
-                parts = []
+                pending_text: list[str] = []
+
                 for item in content:
                     if isinstance(item, dict):
                         if item.get("type") == "text":
-                            parts.append(item.get("text", ""))
+                            pending_text.append(item.get("text", ""))
                         elif item.get("type") == "tool_result":
+                            if pending_text:
+                                input_messages.append({"role": role, "content": "\n".join(pending_text)})
+                                pending_text.clear()
+                            result_content = item.get("content", "")
+                            if not isinstance(result_content, str):
+                                result_content = json.dumps(result_content)
                             input_messages.append({
                                 "type": "function_call_output",
                                 "call_id": item.get("tool_use_id", ""),
-                                "output": str(item.get("content", "")),
+                                "output": result_content,
                             })
                         elif item.get("type") == "tool_use":
+                            if pending_text:
+                                input_messages.append({"role": role, "content": "\n".join(pending_text)})
+                                pending_text.clear()
                             input_messages.append({
                                 "type": "function_call",
                                 "call_id": item.get("id", ""),
                                 "name": item.get("name", ""),
                                 "arguments": json.dumps(item.get("input", {})),
                             })
-                if parts:
-                    input_messages.append({"role": role, "content": "\n".join(parts)})
+
+                if pending_text:
+                    input_messages.append({"role": role, "content": "\n".join(pending_text)})
 
         return system, input_messages
 
@@ -147,6 +158,7 @@ class OpenAIProvider:
         thinking_started = False
         thinking_idx = -1
         cur_idx = 0
+        saw_tool_use = False
         tools: dict[str, dict[str, Any]] = {}
         usage: dict[str, int] = {"input_tokens": 0, "output_tokens": 0}
 
@@ -257,6 +269,7 @@ class OpenAIProvider:
                             if item.get("type") == "function_call":
                                 call_id = item.get("call_id", f"tool_{int(time.time())}")
                                 name = item.get("name", "")
+                                saw_tool_use = True
                                 tools[call_id] = {
                                     "id": call_id,
                                     "name": name,
@@ -357,7 +370,10 @@ class OpenAIProvider:
             "message_delta",
             {
                 "type": "message_delta",
-                "delta": {"stop_reason": "end_turn", "stop_sequence": None},
+                "delta": {
+                    "stop_reason": "tool_use" if saw_tool_use else "end_turn",
+                    "stop_sequence": None,
+                },
                 "usage": usage,
             },
         )
