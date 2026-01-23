@@ -6,77 +6,121 @@ import time
 from collections.abc import AsyncIterator
 from typing import Any
 
-from openai import AsyncOpenAI
+import httpx
 
-from ...transform import (
-    convert_anthropic_messages_to_openai,
-    convert_anthropic_tool_choice_to_openai,
-    convert_anthropic_tools_to_openai,
-)
 from ..utils import map_reasoning_effort
-from .auth import get_api_key
+from .auth import get_auth
 
 logger = logging.getLogger(__name__)
+
+CODEX_API_ENDPOINT = "https://chatgpt.com/backend-api/codex/responses"
 
 
 class OpenAIProvider:
     def __init__(self, target_model: str):
         self.target_model = target_model.removeprefix("openai/")
-        self._api_key: str | None = None
-        self._api_key_expires_at: float = 0
+        self._access_token: str | None = None
+        self._account_id: str | None = None
+        self._expires_at: float = 0
 
     async def handle(self, payload: dict[str, Any]) -> AsyncIterator[str]:
-        self._api_key, self._api_key_expires_at = await get_api_key(
-            self._api_key, self._api_key_expires_at
+        self._access_token, self._account_id, self._expires_at = await get_auth(
+            self._access_token, self._account_id, self._expires_at
         )
-        client = AsyncOpenAI(api_key=self._api_key)
 
-        messages = self._convert_messages(payload)
-        tools = convert_anthropic_tools_to_openai(payload.get("tools"))
+        instructions, input_messages = self._build_input(payload)
+        tools = self._convert_tools(payload.get("tools"))
 
-        kwargs: dict[str, Any] = {
+        request_body: dict[str, Any] = {
             "model": self.target_model,
-            "messages": messages,
+            "instructions": instructions,
+            "input": input_messages,
             "stream": True,
-            "stream_options": {"include_usage": True},
+            "store": False,
         }
 
-        if payload.get("max_tokens"):
-            kwargs["max_completion_tokens"] = payload["max_tokens"]
 
         if payload.get("temperature") is not None:
-            kwargs["temperature"] = payload["temperature"]
+            request_body["temperature"] = payload["temperature"]
 
         if tools:
-            kwargs["tools"] = tools
-            tool_choice = convert_anthropic_tool_choice_to_openai(
-                payload.get("tool_choice")
-            )
-            if tool_choice:
-                kwargs["tool_choice"] = tool_choice
+            request_body["tools"] = tools
 
         if payload.get("thinking"):
             effort = map_reasoning_effort(
                 payload["thinking"].get("budget_tokens"), self.target_model
             )
             if effort:
-                kwargs["reasoning_effort"] = effort
+                request_body["reasoning"] = {"effort": effort, "summary": "auto"}
 
-        async for event in self._stream_response(client, kwargs):
+        async for event in self._stream_response(request_body):
             yield event
 
-    def _convert_messages(self, payload: dict[str, Any]) -> list[dict[str, Any]]:
-        system = payload.get("system")
+    def _build_input(self, payload: dict[str, Any]) -> tuple[str, list[dict[str, Any]]]:
+        system = payload.get("system", "")
         if isinstance(system, list):
             system = "\n\n".join(
                 item.get("text", "") if isinstance(item, dict) else str(item)
                 for item in system
             )
+        if not system:
+            system = "You are a helpful assistant."
 
-        return convert_anthropic_messages_to_openai(payload.get("messages", []), system)
+        input_messages: list[dict[str, Any]] = []
+        for msg in payload.get("messages", []):
+            role = msg.get("role", "user")
+            content = msg.get("content", "")
+
+            if isinstance(content, str):
+                input_messages.append({"role": role, "content": content})
+            elif isinstance(content, list):
+                parts = []
+                for item in content:
+                    if isinstance(item, dict):
+                        if item.get("type") == "text":
+                            parts.append(item.get("text", ""))
+                        elif item.get("type") == "tool_result":
+                            input_messages.append({
+                                "type": "function_call_output",
+                                "call_id": item.get("tool_use_id", ""),
+                                "output": str(item.get("content", "")),
+                            })
+                        elif item.get("type") == "tool_use":
+                            input_messages.append({
+                                "type": "function_call",
+                                "call_id": item.get("id", ""),
+                                "name": item.get("name", ""),
+                                "arguments": json.dumps(item.get("input", {})),
+                            })
+                if parts:
+                    input_messages.append({"role": role, "content": "\n".join(parts)})
+
+        return system, input_messages
+
+    def _convert_tools(self, tools: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
+        if not tools:
+            return []
+        return [
+            {
+                "type": "function",
+                "name": tool["name"],
+                "description": tool.get("description", ""),
+                "parameters": tool.get("input_schema", {}),
+            }
+            for tool in tools
+        ]
+
+    def _build_headers(self) -> dict[str, str]:
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {self._access_token}",
+        }
+        if self._account_id:
+            headers["ChatGPT-Account-Id"] = self._account_id
+        return headers
 
     async def _stream_response(
-        self, client: AsyncOpenAI, kwargs: dict[str, Any]
+        self, request_body: dict[str, Any]
     ) -> AsyncIterator[str]:
         msg_id = f"msg_{int(time.time())}_{self._random_id()}"
 
@@ -103,185 +147,180 @@ class OpenAIProvider:
         thinking_started = False
         thinking_idx = -1
         cur_idx = 0
-        tools: dict[int, dict[str, Any]] = {}
-        usage: dict[str, int] | None = None
+        tools: dict[str, dict[str, Any]] = {}
+        usage: dict[str, int] = {"input_tokens": 0, "output_tokens": 0}
 
         try:
-            stream = await client.chat.completions.create(**kwargs)
-
-            async for chunk in stream:
-                if chunk.usage:
-                    usage = {
-                        "prompt_tokens": chunk.usage.prompt_tokens or 0,
-                        "completion_tokens": chunk.usage.completion_tokens or 0,
-                    }
-
-                if not chunk.choices:
-                    continue
-
-                delta = chunk.choices[0].delta
-
-                reasoning = getattr(delta, "reasoning_content", None) or getattr(
-                    delta, "reasoning", None
-                )
-                if reasoning:
-                    if not thinking_started:
-                        thinking_idx = cur_idx
-                        cur_idx += 1
-                        yield self._sse(
-                            "content_block_start",
-                            {
-                                "type": "content_block_start",
-                                "index": thinking_idx,
-                                "content_block": {
-                                    "type": "thinking",
-                                    "thinking": "",
-                                    "signature": "",
-                                },
-                            },
+            async with httpx.AsyncClient(timeout=300.0) as client:
+                async with client.stream(
+                    "POST",
+                    CODEX_API_ENDPOINT,
+                    headers=self._build_headers(),
+                    json=request_body,
+                ) as response:
+                    if response.status_code != 200:
+                        error_text = await response.aread()
+                        raise RuntimeError(
+                            f"Codex API error ({response.status_code}): {error_text.decode()}"
                         )
-                        thinking_started = True
 
-                    yield self._sse(
-                        "content_block_delta",
-                        {
-                            "type": "content_block_delta",
-                            "index": thinking_idx,
-                            "delta": {"type": "thinking_delta", "thinking": reasoning},
-                        },
-                    )
+                    current_event = ""
+                    async for line in response.aiter_lines():
+                        if not line:
+                            continue
 
-                if delta.content:
-                    if thinking_started:
-                        yield self._sse(
-                            "content_block_delta",
-                            {
-                                "type": "content_block_delta",
-                                "index": thinking_idx,
-                                "delta": {"type": "signature_delta", "signature": ""},
-                            },
-                        )
-                        yield self._sse(
-                            "content_block_stop",
-                            {"type": "content_block_stop", "index": thinking_idx},
-                        )
-                        thinking_started = False
+                        if line.startswith("event: "):
+                            current_event = line[7:]
+                            continue
 
-                    if not text_started:
-                        text_idx = cur_idx
-                        cur_idx += 1
-                        yield self._sse(
-                            "content_block_start",
-                            {
-                                "type": "content_block_start",
-                                "index": text_idx,
-                                "content_block": {"type": "text", "text": ""},
-                            },
-                        )
-                        text_started = True
+                        if not line.startswith("data: "):
+                            continue
 
-                    yield self._sse(
-                        "content_block_delta",
-                        {
-                            "type": "content_block_delta",
-                            "index": text_idx,
-                            "delta": {"type": "text_delta", "text": delta.content},
-                        },
-                    )
+                        data_line = line[6:]
+                        if not data_line or not current_event:
+                            continue
 
-                if delta.tool_calls:
-                    for tc in delta.tool_calls:
-                        idx = tc.index or 0
-                        if idx not in tools:
-                            if thinking_started:
+                        try:
+                            event_data = json.loads(data_line)
+                        except json.JSONDecodeError:
+                            continue
+
+                        event_type = current_event
+
+                        if event_type == "response.output_text.delta":
+                            delta = event_data.get("delta", "")
+                            if delta:
+                                if thinking_started:
+                                    yield self._sse(
+                                        "content_block_delta",
+                                        {
+                                            "type": "content_block_delta",
+                                            "index": thinking_idx,
+                                            "delta": {"type": "signature_delta", "signature": ""},
+                                        },
+                                    )
+                                    yield self._sse(
+                                        "content_block_stop",
+                                        {"type": "content_block_stop", "index": thinking_idx},
+                                    )
+                                    thinking_started = False
+
+                                if not text_started:
+                                    text_idx = cur_idx
+                                    cur_idx += 1
+                                    yield self._sse(
+                                        "content_block_start",
+                                        {
+                                            "type": "content_block_start",
+                                            "index": text_idx,
+                                            "content_block": {"type": "text", "text": ""},
+                                        },
+                                    )
+                                    text_started = True
+
+                                yield self._sse(
+                                    "content_block_delta",
+                                    {
+                                        "type": "content_block_delta",
+                                        "index": text_idx,
+                                        "delta": {"type": "text_delta", "text": delta},
+                                    },
+                                )
+
+                        elif event_type in ("response.reasoning_summary_text.delta", "response.reasoning.delta"):
+                            delta = event_data.get("delta", "")
+                            if delta:
+                                if not thinking_started:
+                                    thinking_idx = cur_idx
+                                    cur_idx += 1
+                                    yield self._sse(
+                                        "content_block_start",
+                                        {
+                                            "type": "content_block_start",
+                                            "index": thinking_idx,
+                                            "content_block": {"type": "thinking", "thinking": "", "signature": ""},
+                                        },
+                                    )
+                                    thinking_started = True
+
                                 yield self._sse(
                                     "content_block_delta",
                                     {
                                         "type": "content_block_delta",
                                         "index": thinking_idx,
-                                        "delta": {
-                                            "type": "signature_delta",
-                                            "signature": "",
-                                        },
+                                        "delta": {"type": "thinking_delta", "thinking": delta},
                                     },
                                 )
+
+                        elif event_type == "response.output_item.added":
+                            item = event_data.get("item", {})
+                            if item.get("type") == "function_call":
+                                call_id = item.get("call_id", f"tool_{int(time.time())}")
+                                name = item.get("name", "")
+                                tools[call_id] = {
+                                    "id": call_id,
+                                    "name": name,
+                                    "block_idx": cur_idx,
+                                    "started": True,
+                                    "closed": False,
+                                }
+                                cur_idx += 1
                                 yield self._sse(
-                                    "content_block_stop",
+                                    "content_block_start",
                                     {
-                                        "type": "content_block_stop",
-                                        "index": thinking_idx,
+                                        "type": "content_block_start",
+                                        "index": tools[call_id]["block_idx"],
+                                        "content_block": {"type": "tool_use", "id": call_id, "name": name},
                                     },
                                 )
-                                thinking_started = False
 
-                            if text_started:
+                        elif event_type == "response.function_call_arguments.delta":
+                            call_id = event_data.get("call_id", "")
+                            delta = event_data.get("delta", "")
+                            if call_id in tools and delta:
                                 yield self._sse(
-                                    "content_block_stop",
-                                    {"type": "content_block_stop", "index": text_idx},
+                                    "content_block_delta",
+                                    {
+                                        "type": "content_block_delta",
+                                        "index": tools[call_id]["block_idx"],
+                                        "delta": {"type": "input_json_delta", "partial_json": delta},
+                                    },
                                 )
-                                text_started = False
 
-                            tools[idx] = {
-                                "id": tc.id or f"tool_{int(time.time())}_{idx}",
-                                "name": "",
-                                "block_idx": cur_idx,
-                                "started": False,
-                                "closed": False,
+                        elif event_type == "response.output_item.done":
+                            item = event_data.get("item", {})
+                            if item.get("type") == "function_call":
+                                call_id = item.get("call_id", "")
+                                if call_id in tools and not tools[call_id]["closed"]:
+                                    args = item.get("arguments", "")
+                                    if args:
+                                        yield self._sse(
+                                            "content_block_delta",
+                                            {
+                                                "type": "content_block_delta",
+                                                "index": tools[call_id]["block_idx"],
+                                                "delta": {"type": "input_json_delta", "partial_json": args},
+                                            },
+                                        )
+                                    yield self._sse(
+                                        "content_block_stop",
+                                        {"type": "content_block_stop", "index": tools[call_id]["block_idx"]},
+                                    )
+                                    tools[call_id]["closed"] = True
+
+                        elif event_type == "response.completed":
+                            resp = event_data.get("response", {})
+                            resp_usage = resp.get("usage", {})
+                            usage = {
+                                "input_tokens": resp_usage.get("input_tokens", 0),
+                                "output_tokens": resp_usage.get("output_tokens", 0),
                             }
-                            cur_idx += 1
-
-                        t = tools[idx]
-
-                        if tc.id:
-                            t["id"] = tc.id
-
-                        if tc.function and tc.function.name and not t["started"]:
-                            t["name"] = tc.function.name
-                            yield self._sse(
-                                "content_block_start",
-                                {
-                                    "type": "content_block_start",
-                                    "index": t["block_idx"],
-                                    "content_block": {
-                                        "type": "tool_use",
-                                        "id": t["id"],
-                                        "name": t["name"],
-                                    },
-                                },
-                            )
-                            t["started"] = True
-
-                        if tc.function and tc.function.arguments and t["started"]:
-                            yield self._sse(
-                                "content_block_delta",
-                                {
-                                    "type": "content_block_delta",
-                                    "index": t["block_idx"],
-                                    "delta": {
-                                        "type": "input_json_delta",
-                                        "partial_json": tc.function.arguments,
-                                    },
-                                },
-                            )
-
-                finish = chunk.choices[0].finish_reason
-                if finish == "tool_calls":
-                    for t in tools.values():
-                        if t["started"] and not t["closed"]:
-                            yield self._sse(
-                                "content_block_stop",
-                                {"type": "content_block_stop", "index": t["block_idx"]},
-                            )
-                            t["closed"] = True
 
         except Exception as e:
-            logger.error("Error calling OpenAI API: %s", e)
+            logger.error("Error calling Codex API: %s", e)
             yield self._sse(
                 "error",
-                {
-                    "type": "error",
-                    "error": {"type": "api_error", "message": str(e)},
-                },
+                {"type": "error", "error": {"type": "api_error", "message": str(e)}},
             )
             yield self._sse("message_stop", {"type": "message_stop"})
             yield "data: [DONE]\n\n"
@@ -319,10 +358,7 @@ class OpenAIProvider:
             {
                 "type": "message_delta",
                 "delta": {"stop_reason": "end_turn", "stop_sequence": None},
-                "usage": {
-                    "input_tokens": usage.get("prompt_tokens", 0) if usage else 0,
-                    "output_tokens": usage.get("completion_tokens", 0) if usage else 0,
-                },
+                "usage": usage,
             },
         )
         yield self._sse("message_stop", {"type": "message_stop"})
