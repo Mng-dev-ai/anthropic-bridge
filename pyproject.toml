@@ -1,6 +1,6 @@
 [project]
 name = "anthropic-bridge"
-version = "0.1.20"
+version = "0.1.21"
 description = "Bridge Anthropic API to OpenRouter and OpenAI models."
 license = "MIT"
 requires-python = ">=3.11"
