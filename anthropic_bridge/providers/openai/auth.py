@@ -71,18 +71,17 @@ async def refresh_tokens(refresh_token: str) -> dict[str, Any]:
         return cast(dict[str, Any], response.json())
 
 
-async def get_api_key(
-    cached_key: str | None, expires_at: float
-) -> tuple[str, float]:
+async def get_api_key(cached_key: str | None, expires_at: float) -> tuple[str, float]:
     if cached_key and time.time() < expires_at:
         return cached_key, expires_at
 
     auth_data = await read_auth_file()
-    id_token = auth_data.get("id_token")
-    refresh_token = auth_data.get("refresh_token")
+    tokens = auth_data.get("tokens", {})
+    id_token = tokens.get("id_token")
+    refresh_token = tokens.get("refresh_token")
 
     if not id_token:
-        raise RuntimeError("No id_token in auth file. Run 'openai login' first.")
+        raise RuntimeError("No id_token in auth file. Run 'codex login' first.")
 
     try:
         api_key, new_expires_at = await exchange_token(id_token)
@@ -91,7 +90,7 @@ async def get_api_key(
             logger.info("id_token expired, refreshing tokens...")
             new_tokens = await refresh_tokens(refresh_token)
 
-            auth_data.update(new_tokens)
+            auth_data.setdefault("tokens", {}).update(new_tokens)
             AUTH_FILE_PATH.write_text(json.dumps(auth_data, indent=2))
 
             new_id_token = new_tokens.get("id_token", id_token)
