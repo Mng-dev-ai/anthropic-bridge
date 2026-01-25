@@ -36,7 +36,7 @@ class OpenRouterProvider:
         if hasattr(provider, "reset"):
             provider.reset()
 
-        messages = self._convert_messages(payload)
+        messages = await self._convert_messages_async(payload)
         tools = convert_anthropic_tools_to_openai(payload.get("tools"))
 
         openrouter_payload: dict[str, Any] = {
@@ -76,8 +76,13 @@ class OpenRouterProvider:
             payload.get("messages", []), system
         )
 
+        return messages
+
+    async def _convert_messages_async(self, payload: dict[str, Any]) -> list[dict[str, Any]]:
+        messages = self._convert_messages(payload)
+
         if self._is_gemini:
-            self._inject_gemini_reasoning(messages, payload.get("messages", []))
+            await self._inject_gemini_reasoning(messages, payload.get("messages", []))
 
         if "grok" in self.target_model.lower() or "x-ai" in self.target_model.lower():
             instruction = (
@@ -91,7 +96,7 @@ class OpenRouterProvider:
 
         return messages
 
-    def _inject_gemini_reasoning(
+    async def _inject_gemini_reasoning(
         self,
         openai_messages: list[dict[str, Any]],
         anthropic_messages: list[dict[str, Any]],
@@ -103,7 +108,7 @@ class OpenRouterProvider:
 
             for tc in msg.get("tool_calls", []):
                 tool_id = tc.get("id", "")
-                cached = cache.get(tool_id)
+                cached = await cache.get(tool_id)
                 if cached:
                     if "reasoning_details" not in msg:
                         msg["reasoning_details"] = []
@@ -313,7 +318,7 @@ class OpenRouterProvider:
                                 {"type": "content_block_stop", "index": tool_idx},
                             )
                             if self._is_gemini and current_reasoning_details:
-                                get_reasoning_cache().set(
+                                await get_reasoning_cache().set(
                                     tc.id, current_reasoning_details.copy()
                                 )
 
@@ -388,7 +393,7 @@ class OpenRouterProvider:
                                 )
                                 t["closed"] = True
                                 if self._is_gemini and current_reasoning_details:
-                                    get_reasoning_cache().set(
+                                    await get_reasoning_cache().set(
                                         t["id"], current_reasoning_details.copy()
                                     )
 
@@ -418,7 +423,7 @@ class OpenRouterProvider:
                     {"type": "content_block_stop", "index": t["block_idx"]},
                 )
                 if self._is_gemini and current_reasoning_details:
-                    get_reasoning_cache().set(t["id"], current_reasoning_details.copy())
+                    await get_reasoning_cache().set(t["id"], current_reasoning_details.copy())
 
         yield self._sse(
             "message_delta",
