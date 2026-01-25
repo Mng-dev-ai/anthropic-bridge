@@ -5,6 +5,7 @@ import time
 from pathlib import Path
 from typing import Any, cast
 
+import aiofiles
 import httpx
 
 logger = logging.getLogger(__name__)
@@ -23,7 +24,9 @@ async def read_auth_file() -> dict[str, Any]:
         raise RuntimeError(
             f"Auth file not found at {AUTH_FILE_PATH}. Run 'codex login' first."
         )
-    return cast(dict[str, Any], json.loads(AUTH_FILE_PATH.read_text()))
+    async with aiofiles.open(AUTH_FILE_PATH, "r") as f:
+        content = await f.read()
+    return cast(dict[str, Any], json.loads(content))
 
 
 def parse_jwt_expiry(token: str) -> float:
@@ -113,7 +116,8 @@ async def get_auth(
 
     auth_data.setdefault("tokens", {}).update(new_tokens)
     try:
-        AUTH_FILE_PATH.write_text(json.dumps(auth_data, indent=2))
+        async with aiofiles.open(AUTH_FILE_PATH, "w") as f:
+            await f.write(json.dumps(auth_data, indent=2))
     except PermissionError:
         logger.warning("Could not save refreshed tokens (permission denied)")
 
