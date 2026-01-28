@@ -327,7 +327,6 @@ class OpenAIProvider:
                                 "output_tokens": resp_usage.get("output_tokens", 0),
                             }
                             break
-                            break
 
         except Exception as e:
             yield self._sse(
@@ -370,7 +369,7 @@ class OpenAIProvider:
             {
                 "type": "message_delta",
                 "delta": {
-                    "stop_reason": "end_turn",
+                    "stop_reason": "tool_use" if saw_tool_use else "end_turn",
                     "stop_sequence": None,
                 },
                 "usage": usage,
