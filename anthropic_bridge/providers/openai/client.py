@@ -370,7 +370,7 @@ class OpenAIProvider:
             {
                 "type": "message_delta",
                 "delta": {
-                    "stop_reason": "tool_use" if saw_tool_use else "end_turn",
+                    "stop_reason": "end_turn",
                     "stop_sequence": None,
                 },
                 "usage": usage,
