@@ -155,7 +155,6 @@ class OpenAIProvider:
         thinking_started = False
         thinking_idx = -1
         cur_idx = 0
-        saw_tool_use = False
         tools: dict[str, dict[str, Any]] = {}
         usage: dict[str, int] = {"input_tokens": 0, "output_tokens": 0}
 
@@ -267,7 +266,6 @@ class OpenAIProvider:
                             if item.get("type") == "function_call":
                                 call_id = item.get("call_id", f"tool_{int(time.time())}")
                                 name = item.get("name", "")
-                                saw_tool_use = True
                                 tools[call_id] = {
                                     "id": call_id,
                                     "name": name,
@@ -369,7 +367,7 @@ class OpenAIProvider:
             {
                 "type": "message_delta",
                 "delta": {
-                    "stop_reason": "tool_use" if saw_tool_use else "end_turn",
+                    "stop_reason": "end_turn",
                     "stop_sequence": None,
                 },
                 "usage": usage,

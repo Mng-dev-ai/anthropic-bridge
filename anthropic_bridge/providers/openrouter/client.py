@@ -36,7 +36,7 @@ class OpenRouterProvider:
         if hasattr(provider, "reset"):
             provider.reset()
 
-        messages = await self._convert_messages_async(payload)
+        messages = self._convert_messages(payload)
         tools = convert_anthropic_tools_to_openai(payload.get("tools"))
 
         openrouter_payload: dict[str, Any] = {
@@ -76,13 +76,8 @@ class OpenRouterProvider:
             payload.get("messages", []), system
         )
 
-        return messages
-
-    async def _convert_messages_async(self, payload: dict[str, Any]) -> list[dict[str, Any]]:
-        messages = self._convert_messages(payload)
-
         if self._is_gemini:
-            await self._inject_gemini_reasoning(messages, payload.get("messages", []))
+            self._inject_gemini_reasoning(messages, payload.get("messages", []))
 
         if "grok" in self.target_model.lower() or "x-ai" in self.target_model.lower():
             instruction = (
@@ -96,7 +91,7 @@ class OpenRouterProvider:
 
         return messages
 
-    async def _inject_gemini_reasoning(
+    def _inject_gemini_reasoning(
         self,
         openai_messages: list[dict[str, Any]],
         anthropic_messages: list[dict[str, Any]],
@@ -108,7 +103,7 @@ class OpenRouterProvider:
 
             for tc in msg.get("tool_calls", []):
                 tool_id = tc.get("id", "")
-                cached = await cache.get(tool_id)
+                cached = cache.get(tool_id)
                 if cached:
                     if "reasoning_details" not in msg:
                         msg["reasoning_details"] = []
@@ -142,8 +137,7 @@ class OpenRouterProvider:
         thinking_started = False
         thinking_idx = -1
         cur_idx = 0
-        saw_tool_use = False
-        tools: dict[object, dict[str, Any]] = {}
+        tools: dict[int, dict[str, Any]] = {}
         usage: dict[str, Any] | None = None
         current_reasoning_details: list[dict[str, Any]] = []
 
@@ -288,7 +282,6 @@ class OpenRouterProvider:
                                 )
                                 text_started = False
 
-                            saw_tool_use = True
                             tool_idx = cur_idx
                             cur_idx += 1
                             yield self._sse(
@@ -319,19 +312,14 @@ class OpenRouterProvider:
                                 {"type": "content_block_stop", "index": tool_idx},
                             )
                             if self._is_gemini and current_reasoning_details:
-                                await get_reasoning_cache().set(
+                                get_reasoning_cache().set(
                                     tc.id, current_reasoning_details.copy()
                                 )
 
                     tool_calls = delta.get("tool_calls", [])
                     for tc in tool_calls:
-                        key: object
-                        if "index" in tc:
-                            key = tc["index"]
-                        else:
-                            key = tc.get("id") or f"tool_{int(time.time())}_{self._random_id()}"
-
-                        if key not in tools:
+                        idx = tc.get("index", 0)
+                        if idx not in tools:
                             if text_started:
                                 yield self._sse(
                                     "content_block_stop",
@@ -339,17 +327,16 @@ class OpenRouterProvider:
                                 )
                                 text_started = False
 
-                            tools[key] = {
-                                "id": tc.get("id") or f"tool_{int(time.time())}",
+                            tools[idx] = {
+                                "id": tc.get("id") or f"tool_{int(time.time())}_{idx}",
                                 "name": tc.get("function", {}).get("name", ""),
                                 "block_idx": cur_idx,
                                 "started": False,
                                 "closed": False,
                             }
                             cur_idx += 1
-                            saw_tool_use = True
 
-                        t = tools[key]
+                        t = tools[idx]
                         fn = tc.get("function", {})
 
                         if fn.get("name") and not t["started"]:
@@ -394,7 +381,7 @@ class OpenRouterProvider:
                                 )
                                 t["closed"] = True
                                 if self._is_gemini and current_reasoning_details:
-                                    await get_reasoning_cache().set(
+                                    get_reasoning_cache().set(
                                         t["id"], current_reasoning_details.copy()
                                     )
 
@@ -424,14 +411,14 @@ class OpenRouterProvider:
                     {"type": "content_block_stop", "index": t["block_idx"]},
                 )
                 if self._is_gemini and current_reasoning_details:
-                    await get_reasoning_cache().set(t["id"], current_reasoning_details.copy())
+                    get_reasoning_cache().set(t["id"], current_reasoning_details.copy())
 
         yield self._sse(
             "message_delta",
             {
                 "type": "message_delta",
                 "delta": {
-                    "stop_reason": "tool_use" if saw_tool_use else "end_turn",
+                    "stop_reason": "end_turn",
                     "stop_sequence": None,
                 },
                 "usage": {
