@@ -327,6 +327,7 @@ class OpenAIProvider:
                                 "output_tokens": resp_usage.get("output_tokens", 0),
                             }
                             break
+                            break
 
         except Exception as e:
             yield self._sse(

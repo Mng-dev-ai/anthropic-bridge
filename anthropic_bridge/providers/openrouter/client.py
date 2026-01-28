@@ -182,6 +182,7 @@ class OpenRouterProvider:
                 lines = buffer.split("\n")
                 buffer = lines.pop()
 
+                done = False
                 for line in lines:
                     line = line.strip()
                     if not line or not line.startswith("data: "):
@@ -189,6 +190,7 @@ class OpenRouterProvider:
 
                     data_str = line[6:]
                     if data_str == "[DONE]":
+                        done = True
                         break
 
                     try:
@@ -397,6 +399,8 @@ class OpenRouterProvider:
                                     await get_reasoning_cache().set(
                                         t["id"], current_reasoning_details.copy()
                                     )
+                if done:
+                    break
 
         if thinking_started:
             yield self._sse(
