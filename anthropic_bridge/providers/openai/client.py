@@ -318,6 +318,10 @@ class OpenAIProvider:
                                         {"type": "content_block_stop", "index": tools[call_id]["block_idx"]},
                                     )
                                     tools[call_id]["closed"] = True
+                                if saw_tool_use and tools and all(
+                                    t["closed"] for t in tools.values()
+                                ):
+                                    break
 
                         elif event_type == "response.completed":
                             resp = event_data.get("response", {})
@@ -326,7 +330,6 @@ class OpenAIProvider:
                                 "input_tokens": resp_usage.get("input_tokens", 0),
                                 "output_tokens": resp_usage.get("output_tokens", 0),
                             }
-                            break
                             break
 
         except Exception as e:

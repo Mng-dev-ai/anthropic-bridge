@@ -399,6 +399,7 @@ class OpenRouterProvider:
                                     await get_reasoning_cache().set(
                                         t["id"], current_reasoning_details.copy()
                                     )
+                        done = True
                 if done:
                     break
 
