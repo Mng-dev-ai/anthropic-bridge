@@ -1,5 +1,4 @@
 import json
-import logging
 import random
 import string
 import time
@@ -10,8 +9,6 @@ import httpx
 
 from ..utils import map_reasoning_effort
 from .auth import get_auth
-
-logger = logging.getLogger(__name__)
 
 CODEX_API_ENDPOINT = "https://chatgpt.com/backend-api/codex/responses"
 
@@ -332,7 +329,6 @@ class OpenAIProvider:
                             break
 
         except Exception as e:
-            logger.error("Error calling Codex API: %s", e)
             yield self._sse(
                 "error",
                 {"type": "error", "error": {"type": "api_error", "message": str(e)}},

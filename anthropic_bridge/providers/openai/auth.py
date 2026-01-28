@@ -1,14 +1,11 @@
 import base64
 import json
-import logging
 import time
 from pathlib import Path
 from typing import Any, cast
 
 import aiofiles
 import httpx
-
-logger = logging.getLogger(__name__)
 
 TOKEN_URL = "https://auth.openai.com/oauth/token"
 CODEX_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann"
@@ -111,7 +108,6 @@ async def get_auth(
     if not refresh_token:
         raise RuntimeError("Token expired and no refresh_token. Run 'codex login'.")
 
-    logger.info("access_token expired, refreshing...")
     new_tokens = await refresh_tokens(refresh_token)
 
     auth_data.setdefault("tokens", {}).update(new_tokens)
@@ -119,7 +115,7 @@ async def get_auth(
         async with aiofiles.open(AUTH_FILE_PATH, "w") as f:
             await f.write(json.dumps(auth_data, indent=2))
     except PermissionError:
-        logger.warning("Could not save refreshed tokens (permission denied)")
+        pass
 
     new_access_token = new_tokens.get("access_token", access_token)
     new_expiry = parse_jwt_expiry(new_access_token)
