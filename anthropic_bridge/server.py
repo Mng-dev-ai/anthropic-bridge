@@ -54,19 +54,12 @@ class AnthropicBridge:
 
             provider = self._get_provider(model)
             if provider is None:
-                if model.startswith("openrouter/"):
-                    error_msg = f"OPENROUTER_API_KEY required for model '{model}'."
-                else:
-                    error_msg = (
-                        f"Unknown model prefix '{model}'. "
-                        "Use openai/* or openrouter/* models."
-                    )
                 return JSONResponse(
                     status_code=401,
                     content={
                         "error": {
                             "type": "authentication_error",
-                            "message": error_msg,
+                            "message": "OPENROUTER_API_KEY required.",
                         }
                     },
                 )
