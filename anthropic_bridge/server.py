@@ -83,16 +83,14 @@ class AnthropicBridge:
                 self._openai_clients[model] = OpenAIProvider(model)
             return self._openai_clients[model]
 
-        if model.startswith("openrouter/"):
-            if not self.config.openrouter_api_key:
-                return None
-            if model not in self._openrouter_clients:
-                self._openrouter_clients[model] = OpenRouterProvider(
-                    model, self.config.openrouter_api_key
-                )
-            return self._openrouter_clients[model]
-
-        return None
+        # For openrouter/* models or any other model (fallback to OpenRouter)
+        if not self.config.openrouter_api_key:
+            return None
+        if model not in self._openrouter_clients:
+            self._openrouter_clients[model] = OpenRouterProvider(
+                model, self.config.openrouter_api_key
+            )
+        return self._openrouter_clients[model]
 
 
 def create_app(openrouter_api_key: str | None = None) -> FastAPI:
