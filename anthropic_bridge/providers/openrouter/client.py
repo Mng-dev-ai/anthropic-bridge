@@ -189,7 +189,7 @@ class OpenRouterProvider:
 
                     data_str = line[6:]
                     if data_str == "[DONE]":
-                        continue
+                        break
 
                     try:
                         data = json.loads(data_str)
@@ -225,17 +225,18 @@ class OpenRouterProvider:
                             )
                             thinking_started = True
 
-                        yield self._sse(
-                            "content_block_delta",
-                            {
-                                "type": "content_block_delta",
-                                "index": thinking_idx,
-                                "delta": {
-                                    "type": "thinking_delta",
-                                    "thinking": reasoning,
+                        if thinking_started:
+                            yield self._sse(
+                                "content_block_delta",
+                                {
+                                    "type": "content_block_delta",
+                                    "index": thinking_idx,
+                                    "delta": {
+                                        "type": "thinking_delta",
+                                        "thinking": reasoning,
+                                    },
                                 },
-                            },
-                        )
+                            )
 
                     if content:
                         if thinking_started:

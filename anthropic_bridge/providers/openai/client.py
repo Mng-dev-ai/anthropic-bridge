@@ -255,14 +255,15 @@ class OpenAIProvider:
                                     )
                                     thinking_started = True
 
-                                yield self._sse(
-                                    "content_block_delta",
-                                    {
-                                        "type": "content_block_delta",
-                                        "index": thinking_idx,
-                                        "delta": {"type": "thinking_delta", "thinking": delta},
-                                    },
-                                )
+                                if thinking_started:
+                                    yield self._sse(
+                                        "content_block_delta",
+                                        {
+                                            "type": "content_block_delta",
+                                            "index": thinking_idx,
+                                            "delta": {"type": "thinking_delta", "thinking": delta},
+                                        },
+                                    )
 
                         elif event_type == "response.output_item.added":
                             item = event_data.get("item", {})
@@ -328,6 +329,7 @@ class OpenAIProvider:
                                 "input_tokens": resp_usage.get("input_tokens", 0),
                                 "output_tokens": resp_usage.get("output_tokens", 0),
                             }
+                            break
 
         except Exception as e:
             logger.error("Error calling Codex API: %s", e)
