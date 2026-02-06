@@ -178,7 +178,9 @@ def convert_anthropic_messages_to_openai(
                         tool_id = block.get("tool_use_id")
                         if tool_id and tool_id not in seen_tool_ids:
                             if content_parts:
-                                openai_messages.append({"role": "user", "content": list(content_parts)})
+                                openai_messages.append(
+                                    {"role": "user", "content": list(content_parts)}
+                                )
                                 content_parts.clear()
                             seen_tool_ids.add(tool_id)
                             result_content = block.get("content", "")
