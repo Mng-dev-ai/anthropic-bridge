@@ -36,7 +36,6 @@ class OpenAIProvider:
             "store": False,
         }
 
-
         if payload.get("temperature") is not None:
             request_body["temperature"] = payload["temperature"]
 
@@ -79,33 +78,45 @@ class OpenAIProvider:
                             pending_text.append(item.get("text", ""))
                         elif item.get("type") == "tool_result":
                             if pending_text:
-                                input_messages.append({"role": role, "content": "\n".join(pending_text)})
+                                input_messages.append(
+                                    {"role": role, "content": "\n".join(pending_text)}
+                                )
                                 pending_text.clear()
                             result_content = item.get("content", "")
                             if not isinstance(result_content, str):
                                 result_content = json.dumps(result_content)
-                            input_messages.append({
-                                "type": "function_call_output",
-                                "call_id": item.get("tool_use_id", ""),
-                                "output": result_content,
-                            })
+                            input_messages.append(
+                                {
+                                    "type": "function_call_output",
+                                    "call_id": item.get("tool_use_id", ""),
+                                    "output": result_content,
+                                }
+                            )
                         elif item.get("type") == "tool_use":
                             if pending_text:
-                                input_messages.append({"role": role, "content": "\n".join(pending_text)})
+                                input_messages.append(
+                                    {"role": role, "content": "\n".join(pending_text)}
+                                )
                                 pending_text.clear()
-                            input_messages.append({
-                                "type": "function_call",
-                                "call_id": item.get("id", ""),
-                                "name": item.get("name", ""),
-                                "arguments": json.dumps(item.get("input", {})),
-                            })
+                            input_messages.append(
+                                {
+                                    "type": "function_call",
+                                    "call_id": item.get("id", ""),
+                                    "name": item.get("name", ""),
+                                    "arguments": json.dumps(item.get("input", {})),
+                                }
+                            )
 
                 if pending_text:
-                    input_messages.append({"role": role, "content": "\n".join(pending_text)})
+                    input_messages.append(
+                        {"role": role, "content": "\n".join(pending_text)}
+                    )
 
         return system, input_messages
 
-    def _convert_tools(self, tools: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
+    def _convert_tools(
+        self, tools: list[dict[str, Any]] | None
+    ) -> list[dict[str, Any]]:
         if not tools:
             return []
         return [
@@ -204,12 +215,18 @@ class OpenAIProvider:
                                         {
                                             "type": "content_block_delta",
                                             "index": thinking_idx,
-                                            "delta": {"type": "signature_delta", "signature": ""},
+                                            "delta": {
+                                                "type": "signature_delta",
+                                                "signature": "",
+                                            },
                                         },
                                     )
                                     yield self._sse(
                                         "content_block_stop",
-                                        {"type": "content_block_stop", "index": thinking_idx},
+                                        {
+                                            "type": "content_block_stop",
+                                            "index": thinking_idx,
+                                        },
                                     )
                                     thinking_started = False
 
@@ -221,7 +238,10 @@ class OpenAIProvider:
                                         {
                                             "type": "content_block_start",
                                             "index": text_idx,
-                                            "content_block": {"type": "text", "text": ""},
+                                            "content_block": {
+                                                "type": "text",
+                                                "text": "",
+                                            },
                                         },
                                     )
                                     text_started = True
@@ -235,7 +255,10 @@ class OpenAIProvider:
                                     },
                                 )
 
-                        elif event_type in ("response.reasoning_summary_text.delta", "response.reasoning.delta"):
+                        elif event_type in (
+                            "response.reasoning_summary_text.delta",
+                            "response.reasoning.delta",
+                        ):
                             delta = event_data.get("delta", "")
                             if delta:
                                 if not thinking_started:
@@ -246,7 +269,11 @@ class OpenAIProvider:
                                         {
                                             "type": "content_block_start",
                                             "index": thinking_idx,
-                                            "content_block": {"type": "thinking", "thinking": "", "signature": ""},
+                                            "content_block": {
+                                                "type": "thinking",
+                                                "thinking": "",
+                                                "signature": "",
+                                            },
                                         },
                                     )
                                     thinking_started = True
@@ -257,14 +284,19 @@ class OpenAIProvider:
                                         {
                                             "type": "content_block_delta",
                                             "index": thinking_idx,
-                                            "delta": {"type": "thinking_delta", "thinking": delta},
+                                            "delta": {
+                                                "type": "thinking_delta",
+                                                "thinking": delta,
+                                            },
                                         },
                                     )
 
                         elif event_type == "response.output_item.added":
                             item = event_data.get("item", {})
                             if item.get("type") == "function_call":
-                                call_id = item.get("call_id", f"tool_{int(time.time())}")
+                                call_id = item.get(
+                                    "call_id", f"tool_{int(time.time())}"
+                                )
                                 name = item.get("name", "")
                                 tools[call_id] = {
                                     "id": call_id,
@@ -279,7 +311,11 @@ class OpenAIProvider:
                                     {
                                         "type": "content_block_start",
                                         "index": tools[call_id]["block_idx"],
-                                        "content_block": {"type": "tool_use", "id": call_id, "name": name},
+                                        "content_block": {
+                                            "type": "tool_use",
+                                            "id": call_id,
+                                            "name": name,
+                                        },
                                     },
                                 )
 
@@ -292,7 +328,10 @@ class OpenAIProvider:
                                     {
                                         "type": "content_block_delta",
                                         "index": tools[call_id]["block_idx"],
-                                        "delta": {"type": "input_json_delta", "partial_json": delta},
+                                        "delta": {
+                                            "type": "input_json_delta",
+                                            "partial_json": delta,
+                                        },
                                     },
                                 )
 
@@ -308,12 +347,18 @@ class OpenAIProvider:
                                             {
                                                 "type": "content_block_delta",
                                                 "index": tools[call_id]["block_idx"],
-                                                "delta": {"type": "input_json_delta", "partial_json": args},
+                                                "delta": {
+                                                    "type": "input_json_delta",
+                                                    "partial_json": args,
+                                                },
                                             },
                                         )
                                     yield self._sse(
                                         "content_block_stop",
-                                        {"type": "content_block_stop", "index": tools[call_id]["block_idx"]},
+                                        {
+                                            "type": "content_block_stop",
+                                            "index": tools[call_id]["block_idx"],
+                                        },
                                     )
                                     tools[call_id]["closed"] = True
 

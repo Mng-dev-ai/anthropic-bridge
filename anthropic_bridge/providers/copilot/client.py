@@ -7,39 +7,45 @@ from typing import Any
 
 import httpx
 
-from ...cache import get_reasoning_cache
 from ...transform import (
     convert_anthropic_messages_to_openai,
     convert_anthropic_tool_choice_to_openai,
     convert_anthropic_tools_to_openai,
 )
-from .registry import ProviderRegistry
+from .auth import get_copilot_token
 
-OPENROUTER_API_URL = "https://openrouter.ai/api/v1/chat/completions"
-OPENROUTER_HEADERS = {
-    "HTTP-Referer": "https://github.com/Mng-dev-ai/claudex",
-    "X-Title": "Claudex",
-}
+COPILOT_API_URL = "https://api.githubcopilot.com/chat/completions"
 
 
-class OpenRouterProvider:
-    def __init__(self, target_model: str, api_key: str):
-        self.target_model = target_model.removeprefix("openrouter/")
-        self.api_key = api_key
-        self.provider_registry = ProviderRegistry(self.target_model)
-        self._is_gemini = (
-            "gemini" in target_model.lower() or "google/" in target_model.lower()
-        )
+class CopilotProvider:
+    def __init__(self, target_model: str, token: str | None = None):
+        self.target_model = target_model.removeprefix("copilot/")
+        self._token = token
+
+    def _get_token(self) -> str | None:
+        return self._token or get_copilot_token()
 
     async def handle(self, payload: dict[str, Any]) -> AsyncIterator[str]:
-        provider = self.provider_registry.get_provider()
-        if hasattr(provider, "reset"):
-            provider.reset()
+        token = self._get_token()
+        if not token:
+            yield self._sse(
+                "error",
+                {
+                    "type": "error",
+                    "error": {
+                        "type": "authentication_error",
+                        "message": "GitHub Copilot token not found. Run 'anthropic-bridge login' or set GITHUB_COPILOT_TOKEN.",
+                    },
+                },
+            )
+            yield self._sse("message_stop", {"type": "message_stop"})
+            yield "data: [DONE]\n\n"
+            return
 
         messages = self._convert_messages(payload)
         tools = convert_anthropic_tools_to_openai(payload.get("tools"))
 
-        openrouter_payload: dict[str, Any] = {
+        copilot_payload: dict[str, Any] = {
             "model": self.target_model,
             "messages": messages,
             "temperature": payload.get("temperature", 1),
@@ -49,19 +55,17 @@ class OpenRouterProvider:
         }
 
         if tools:
-            openrouter_payload["tools"] = tools
+            copilot_payload["tools"] = tools
             tool_choice = convert_anthropic_tool_choice_to_openai(
                 payload.get("tool_choice")
             )
             if tool_choice:
-                openrouter_payload["tool_choice"] = tool_choice
+                copilot_payload["tool_choice"] = tool_choice
 
         if payload.get("thinking"):
-            openrouter_payload["include_reasoning"] = True
+            copilot_payload["include_reasoning"] = True
 
-        provider.prepare_request(openrouter_payload, payload)
-
-        async for event in self._stream_openrouter(openrouter_payload, provider):
+        async for event in self._stream_copilot(copilot_payload, token):
             yield event
 
     def _convert_messages(self, payload: dict[str, Any]) -> list[dict[str, Any]]:
@@ -71,46 +75,19 @@ class OpenRouterProvider:
                 item.get("text", "") if isinstance(item, dict) else str(item)
                 for item in system
             )
+        return convert_anthropic_messages_to_openai(payload.get("messages", []), system)
 
-        messages = convert_anthropic_messages_to_openai(
-            payload.get("messages", []), system
-        )
+    def _build_headers(self, token: str) -> dict[str, str]:
+        return {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {token}",
+            "Openai-Intent": "conversation-edits",
+            "x-initiator": "user",
+            "User-Agent": "anthropic-bridge/0.1",
+        }
 
-        if self._is_gemini:
-            self._inject_gemini_reasoning(messages, payload.get("messages", []))
-
-        if "grok" in self.target_model.lower() or "x-ai" in self.target_model.lower():
-            instruction = (
-                "IMPORTANT: When calling tools, you MUST use the OpenAI tool_calls format with JSON. "
-                "NEVER use XML format like <xai:function_call>."
-            )
-            if messages and messages[0].get("role") == "system":
-                messages[0]["content"] += "\n\n" + instruction
-            else:
-                messages.insert(0, {"role": "system", "content": instruction})
-
-        return messages
-
-    def _inject_gemini_reasoning(
-        self,
-        openai_messages: list[dict[str, Any]],
-        anthropic_messages: list[dict[str, Any]],
-    ) -> None:
-        cache = get_reasoning_cache()
-        for msg in openai_messages:
-            if msg.get("role") != "assistant" or not msg.get("tool_calls"):
-                continue
-
-            for tc in msg.get("tool_calls", []):
-                tool_id = tc.get("id", "")
-                cached = cache.get(tool_id)
-                if cached:
-                    if "reasoning_details" not in msg:
-                        msg["reasoning_details"] = []
-                    msg["reasoning_details"].extend(cached)
-
-    async def _stream_openrouter(
-        self, payload: dict[str, Any], provider: Any
+    async def _stream_copilot(
+        self, payload: dict[str, Any], token: str
     ) -> AsyncIterator[str]:
         msg_id = f"msg_{int(time.time())}_{self._random_id()}"
 
@@ -139,18 +116,13 @@ class OpenRouterProvider:
         cur_idx = 0
         tools: dict[int, dict[str, Any]] = {}
         usage: dict[str, Any] | None = None
-        current_reasoning_details: list[dict[str, Any]] = []
 
         async with (
             httpx.AsyncClient(timeout=300.0) as client,
             client.stream(
                 "POST",
-                OPENROUTER_API_URL,
-                headers={
-                    "Content-Type": "application/json",
-                    "Authorization": f"Bearer {self.api_key}",
-                    **OPENROUTER_HEADERS,
-                },
+                COPILOT_API_URL,
+                headers=self._build_headers(token),
                 json=payload,
             ) as response,
         ):
@@ -195,9 +167,6 @@ class OpenRouterProvider:
 
                     delta = data.get("choices", [{}])[0].get("delta", {})
 
-                    if self._is_gemini and delta.get("reasoning_details"):
-                        current_reasoning_details.extend(delta["reasoning_details"])
-
                     reasoning = delta.get("reasoning") or ""
                     content = delta.get("content") or ""
 
@@ -219,18 +188,17 @@ class OpenRouterProvider:
                             )
                             thinking_started = True
 
-                        if thinking_started:
-                            yield self._sse(
-                                "content_block_delta",
-                                {
-                                    "type": "content_block_delta",
-                                    "index": thinking_idx,
-                                    "delta": {
-                                        "type": "thinking_delta",
-                                        "thinking": reasoning,
-                                    },
+                        yield self._sse(
+                            "content_block_delta",
+                            {
+                                "type": "content_block_delta",
+                                "index": thinking_idx,
+                                "delta": {
+                                    "type": "thinking_delta",
+                                    "thinking": reasoning,
                                 },
-                            )
+                            },
+                        )
 
                     if content:
                         if thinking_started:
@@ -247,77 +215,34 @@ class OpenRouterProvider:
                             )
                             yield self._sse(
                                 "content_block_stop",
-                                {"type": "content_block_stop", "index": thinking_idx},
+                                {
+                                    "type": "content_block_stop",
+                                    "index": thinking_idx,
+                                },
                             )
                             thinking_started = False
 
-                        result = provider.process_text_content(content, "")
-                        clean_text = result.cleaned_text
-
-                        if clean_text:
-                            if not text_started:
-                                text_idx = cur_idx
-                                cur_idx += 1
-                                yield self._sse(
-                                    "content_block_start",
-                                    {
-                                        "type": "content_block_start",
-                                        "index": text_idx,
-                                        "content_block": {"type": "text", "text": ""},
-                                    },
-                                )
-                                text_started = True
-
-                            yield self._sse(
-                                "content_block_delta",
-                                {
-                                    "type": "content_block_delta",
-                                    "index": text_idx,
-                                    "delta": {"type": "text_delta", "text": clean_text},
-                                },
-                            )
-
-                        for tc in result.extracted_tool_calls:
-                            if text_started:
-                                yield self._sse(
-                                    "content_block_stop",
-                                    {"type": "content_block_stop", "index": text_idx},
-                                )
-                                text_started = False
-
-                            tool_idx = cur_idx
+                        if not text_started:
+                            text_idx = cur_idx
                             cur_idx += 1
                             yield self._sse(
                                 "content_block_start",
                                 {
                                     "type": "content_block_start",
-                                    "index": tool_idx,
-                                    "content_block": {
-                                        "type": "tool_use",
-                                        "id": tc.id,
-                                        "name": tc.name,
-                                    },
+                                    "index": text_idx,
+                                    "content_block": {"type": "text", "text": ""},
                                 },
                             )
-                            yield self._sse(
-                                "content_block_delta",
-                                {
-                                    "type": "content_block_delta",
-                                    "index": tool_idx,
-                                    "delta": {
-                                        "type": "input_json_delta",
-                                        "partial_json": json.dumps(tc.arguments),
-                                    },
-                                },
-                            )
-                            yield self._sse(
-                                "content_block_stop",
-                                {"type": "content_block_stop", "index": tool_idx},
-                            )
-                            if self._is_gemini and current_reasoning_details:
-                                get_reasoning_cache().set(
-                                    tc.id, current_reasoning_details.copy()
-                                )
+                            text_started = True
+
+                        yield self._sse(
+                            "content_block_delta",
+                            {
+                                "type": "content_block_delta",
+                                "index": text_idx,
+                                "delta": {"type": "text_delta", "text": content},
+                            },
+                        )
 
                     tool_calls = delta.get("tool_calls", [])
                     for tc in tool_calls:
@@ -326,7 +251,10 @@ class OpenRouterProvider:
                             if text_started:
                                 yield self._sse(
                                     "content_block_stop",
-                                    {"type": "content_block_stop", "index": text_idx},
+                                    {
+                                        "type": "content_block_stop",
+                                        "index": text_idx,
+                                    },
                                 )
                                 text_started = False
 
@@ -383,10 +311,6 @@ class OpenRouterProvider:
                                     },
                                 )
                                 t["closed"] = True
-                                if self._is_gemini and current_reasoning_details:
-                                    get_reasoning_cache().set(
-                                        t["id"], current_reasoning_details.copy()
-                                    )
 
         if thinking_started:
             yield self._sse(
@@ -404,7 +328,8 @@ class OpenRouterProvider:
 
         if text_started:
             yield self._sse(
-                "content_block_stop", {"type": "content_block_stop", "index": text_idx}
+                "content_block_stop",
+                {"type": "content_block_stop", "index": text_idx},
             )
 
         for t in tools.values():
@@ -413,8 +338,6 @@ class OpenRouterProvider:
                     "content_block_stop",
                     {"type": "content_block_stop", "index": t["block_idx"]},
                 )
-                if self._is_gemini and current_reasoning_details:
-                    get_reasoning_cache().set(t["id"], current_reasoning_details.copy())
 
         yield self._sse(
             "message_delta",
@@ -426,7 +349,9 @@ class OpenRouterProvider:
                 },
                 "usage": {
                     "input_tokens": usage.get("prompt_tokens", 0) if usage else 0,
-                    "output_tokens": usage.get("completion_tokens", 0) if usage else 0,
+                    "output_tokens": (
+                        usage.get("completion_tokens", 0) if usage else 0
+                    ),
                 },
             },
         )

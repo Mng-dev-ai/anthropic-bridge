@@ -52,8 +52,14 @@ def extract_account_id(tokens: dict[str, Any]) -> str | None:
 
             account_id: str | None = (
                 claims.get("chatgpt_account_id")
-                or claims.get("https://api.openai.com/auth", {}).get("chatgpt_account_id")
-                or (claims.get("organizations", [{}])[0].get("id") if claims.get("organizations") else None)
+                or claims.get("https://api.openai.com/auth", {}).get(
+                    "chatgpt_account_id"
+                )
+                or (
+                    claims.get("organizations", [{}])[0].get("id")
+                    if claims.get("organizations")
+                    else None
+                )
             )
             if account_id:
                 return account_id

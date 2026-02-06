@@ -8,10 +8,9 @@ A proxy server that exposes an Anthropic Messages API-compatible endpoint while 
 - Streaming SSE responses
 - Tool/function calling support
 - Multi-round conversations
-- Support for multiple providers: OpenAI, Gemini, Grok, DeepSeek, Qwen, MiniMax
+- Support for multiple providers: OpenAI, GitHub Copilot, OpenRouter (Gemini, Grok, DeepSeek, Qwen, MiniMax, etc.)
 - Extended thinking/reasoning support for compatible models
 - Reasoning cache for Gemini models across tool call rounds
-- OpenAI integration via ChatGPT subscription (uses Codex CLI for auth)
 
 ## Installation
 
@@ -29,21 +28,15 @@ pip install -e ".[test,dev]"
 
 ## Usage
 
-### With OpenAI (ChatGPT Subscription)
-
-First, authenticate with Codex CLI using your ChatGPT subscription:
-
-```bash
-codex login
-```
-
-Then start the bridge:
+Start the bridge server:
 
 ```bash
 anthropic-bridge --port 8080
 ```
 
-Use `openai/` prefixed models:
+All providers are configured via environment variables. The server is designed to run inside managed environments (e.g. claudex sandboxes) where tokens are injected automatically.
+
+### Provider Examples
 
 ```python
 from anthropic import Anthropic
@@ -53,20 +46,35 @@ client = Anthropic(
     base_url="http://localhost:8080"
 )
 
+# OpenAI (via ChatGPT subscription)
 response = client.messages.create(
-    model="openai/gpt-5.2-codex",
+    model="openai/gpt-5.3-codex",
+    max_tokens=1024,
+    messages=[{"role": "user", "content": "Hello!"}]
+)
+
+# GitHub Copilot
+response = client.messages.create(
+    model="copilot/gpt-5.3-codex",
+    max_tokens=1024,
+    messages=[{"role": "user", "content": "Hello!"}]
+)
+
+# OpenRouter
+response = client.messages.create(
+    model="openrouter/google/gemini-2.5-pro-preview",
     max_tokens=1024,
     messages=[{"role": "user", "content": "Hello!"}]
 )
 ```
 
-#### OpenAI Models with Thinking
+### Thinking/Reasoning
 
-Use the `thinking` parameter to control reasoning effort:
+Use the `thinking` parameter to control reasoning effort (supported on OpenAI and compatible models):
 
 ```python
 response = client.messages.create(
-    model="openai/gpt-5.2-codex",
+    model="openai/gpt-5.3-codex",
     max_tokens=1024,
     thinking={"budget_tokens": 15000},  # Maps to "high" effort
     messages=[{"role": "user", "content": "Solve this problem..."}]
@@ -80,32 +88,6 @@ response = client.messages.create(
 | 15,000 - 31,999 | high |
 | 32,000+ | xhigh |
 
-### With OpenRouter
-
-Set your OpenRouter API key and start the server:
-
-```bash
-export OPENROUTER_API_KEY=your_key
-anthropic-bridge --port 8080 --host 127.0.0.1
-```
-
-Use `openrouter/` prefixed models:
-
-```python
-from anthropic import Anthropic
-
-client = Anthropic(
-    api_key="not-used",
-    base_url="http://localhost:8080"
-)
-
-response = client.messages.create(
-    model="openrouter/google/gemini-2.5-pro-preview",
-    max_tokens=1024,
-    messages=[{"role": "user", "content": "Hello!"}]
-)
-```
-
 ## API Endpoints
 
 | Endpoint | Method | Description |
@@ -117,9 +99,14 @@ response = client.messages.create(
 
 ## Configuration
 
+All providers are configured exclusively through environment variables:
+
 | Environment Variable | Required | Description |
 |---------------------|----------|-------------|
-| `OPENROUTER_API_KEY` | No* | Your OpenRouter API key (*required for `openrouter/*` models) |
+| `OPENROUTER_API_KEY` | No | OpenRouter API key (required for `openrouter/*` models) |
+| `GITHUB_COPILOT_TOKEN` | No | GitHub Copilot OAuth token (required for `copilot/*` models) |
+
+OpenAI models (`openai/*`) authenticate via the Codex CLI auth file (`~/.codex/auth.json`), which is set up externally.
 
 | CLI Flag | Default | Description |
 |----------|---------|-------------|
@@ -128,15 +115,23 @@ response = client.messages.create(
 
 ### Model Routing
 
-- `openai/*` models → Direct OpenAI API (via Codex CLI auth)
-- `openrouter/*` models → OpenRouter API (requires `OPENROUTER_API_KEY`)
+- `openai/*` → Direct OpenAI API (via Codex CLI auth)
+- `copilot/*` → GitHub Copilot API (via `GITHUB_COPILOT_TOKEN`)
+- `openrouter/*` → OpenRouter API (via `OPENROUTER_API_KEY`)
+- Any other model → Falls back to OpenRouter
 
 ## Supported Models
 
 ### OpenAI (via ChatGPT subscription)
 
-- `openai/gpt-5.2-codex` - GPT-5.2 Codex
-- `openai/gpt-5.2` - GPT-5.2
+- `openai/gpt-5.3-codex` - Codex 5.3
+- `openai/gpt-5.2-codex` - Codex 5.2
+
+### GitHub Copilot (via GitHub Copilot subscription)
+
+- `copilot/gpt-5.3-codex` - Codex 5.3
+- `copilot/claude-opus-4.6` - Claude Opus 4.6
+- `copilot/gemini-3-pro` - Gemini 3 Pro
 
 ### OpenRouter
 
