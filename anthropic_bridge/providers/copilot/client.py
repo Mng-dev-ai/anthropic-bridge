@@ -36,6 +36,12 @@ class CopilotProvider:
         model = self.target_model.lower()
         return model.startswith("gpt-5") and "mini" not in model
 
+    def _supports_reasoning(self) -> bool:
+        model = self.target_model.lower()
+        if "grok" in model:
+            return False
+        return True
+
     async def handle(self, payload: dict[str, Any]) -> AsyncIterator[str]:
         token = self._get_token()
         if not token:
@@ -125,7 +131,7 @@ class CopilotProvider:
             budget = payload["thinking"].get("budget_tokens", 0)
             if "claude" in self.target_model.lower():
                 copilot_payload["thinking_budget"] = budget or 4000
-            else:
+            elif self._supports_reasoning():
                 copilot_payload["include_reasoning"] = True
                 effort = map_reasoning_effort(budget, self.target_model) or "medium"
                 copilot_payload["reasoning_effort"] = effort
