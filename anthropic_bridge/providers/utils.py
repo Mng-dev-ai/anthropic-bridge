@@ -23,9 +23,9 @@ def _model_supports_xhigh(model_id: str | None) -> bool:
         return False
 
     lower = model_id.lower()
-    if "openai/" in lower:
-        lower = lower.split("openai/", 1)[1]
+    if "/" in lower:
+        lower = lower.split("/", 1)[1]
 
     # OpenAI docs: xhigh is supported for gpt-5.1-codex-max and for models
-    # after gpt-5.1-codex-max (e.g., gpt-5.2 and gpt-5.2-codex variants).
-    return lower.startswith(("gpt-5.1-codex-max", "gpt-5.2"))
+    # after gpt-5.1-codex-max (e.g., gpt-5.2, gpt-5.3 and their codex variants).
+    return lower.startswith(("gpt-5.1-codex-max", "gpt-5.2", "gpt-5.3"))

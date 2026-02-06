@@ -12,6 +12,7 @@ from ...transform import (
     convert_anthropic_tool_choice_to_openai,
     convert_anthropic_tools_to_openai,
 )
+from ..utils import map_reasoning_effort
 from .auth import get_copilot_token
 
 COPILOT_API_URL = "https://api.githubcopilot.com/chat/completions"
@@ -34,7 +35,7 @@ class CopilotProvider:
                     "type": "error",
                     "error": {
                         "type": "authentication_error",
-                        "message": "GitHub Copilot token not found. Run 'anthropic-bridge login' or set GITHUB_COPILOT_TOKEN.",
+                        "message": "GitHub Copilot token not found. Set GITHUB_COPILOT_TOKEN.",
                     },
                 },
             )
@@ -63,7 +64,15 @@ class CopilotProvider:
                 copilot_payload["tool_choice"] = tool_choice
 
         if payload.get("thinking"):
-            copilot_payload["include_reasoning"] = True
+            budget = payload["thinking"].get("budget_tokens", 0)
+            if "claude" in self.target_model.lower():
+                copilot_payload["thinking_budget"] = budget or 4000
+            else:
+                copilot_payload["include_reasoning"] = True
+                effort = map_reasoning_effort(budget, self.target_model) or "medium"
+                copilot_payload["reasoning_effort"] = effort
+                copilot_payload["reasoning_summary"] = "auto"
+                copilot_payload["include"] = ["reasoning.encrypted_content"]
 
         async for event in self._stream_copilot(copilot_payload, token):
             yield event
@@ -167,7 +176,7 @@ class CopilotProvider:
 
                     delta = data.get("choices", [{}])[0].get("delta", {})
 
-                    reasoning = delta.get("reasoning") or ""
+                    reasoning = delta.get("reasoning") or delta.get("reasoning_text") or ""
                     content = delta.get("content") or ""
 
                     if reasoning:
