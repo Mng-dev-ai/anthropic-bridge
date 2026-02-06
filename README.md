@@ -55,7 +55,7 @@ response = client.messages.create(
 
 # GitHub Copilot
 response = client.messages.create(
-    model="copilot/gpt-5.3-codex",
+    model="copilot/gpt-5.2-codex",
     max_tokens=1024,
     messages=[{"role": "user", "content": "Hello!"}]
 )
@@ -129,9 +129,9 @@ OpenAI models (`openai/*`) authenticate via the Codex CLI auth file (`~/.codex/a
 
 ### GitHub Copilot (via GitHub Copilot subscription)
 
-- `copilot/gpt-5.3-codex` - Codex 5.3
-- `copilot/claude-opus-4.6` - Claude Opus 4.6
-- `copilot/gemini-3-pro` - Gemini 3 Pro
+- `copilot/gpt-5.2-codex` - Codex 5.2
+- `copilot/claude-opus-4.5` - Claude Opus 4.5
+- `copilot/gemini-3-pro-preview` - Gemini 3 Pro
 
 ### OpenRouter
 
