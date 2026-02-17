@@ -126,7 +126,12 @@ class OpenRouterProvider:
                     "model": self.target_model,
                     "stop_reason": None,
                     "stop_sequence": None,
-                    "usage": {"input_tokens": 0, "output_tokens": 0},
+                    "usage": {
+                        "input_tokens": 0,
+                        "cache_creation_input_tokens": 0,
+                        "cache_read_input_tokens": 0,
+                        "output_tokens": 1,
+                    },
                 },
             },
         )
@@ -174,11 +179,15 @@ class OpenRouterProvider:
                             "stop_reason": "end_turn",
                             "stop_sequence": None,
                         },
-                        "usage": {"input_tokens": 0, "output_tokens": 0},
+                        "usage": {
+                            "input_tokens": 0,
+                            "cache_creation_input_tokens": 0,
+                            "cache_read_input_tokens": 0,
+                            "output_tokens": 0,
+                        },
                     },
                 )
                 yield self._sse("message_stop", {"type": "message_stop"})
-                yield "data: [DONE]\n\n"
                 return
 
             buffer = ""
@@ -230,18 +239,17 @@ class OpenRouterProvider:
                             )
                             thinking_started = True
 
-                        if thinking_started:
-                            yield self._sse(
-                                "content_block_delta",
-                                {
-                                    "type": "content_block_delta",
-                                    "index": thinking_idx,
-                                    "delta": {
-                                        "type": "thinking_delta",
-                                        "thinking": reasoning,
-                                    },
+                        yield self._sse(
+                            "content_block_delta",
+                            {
+                                "type": "content_block_delta",
+                                "index": thinking_idx,
+                                "delta": {
+                                    "type": "thinking_delta",
+                                    "thinking": reasoning,
                                 },
-                            )
+                            },
+                        )
 
                     if content:
                         if thinking_started:
@@ -307,6 +315,7 @@ class OpenRouterProvider:
                                         "type": "tool_use",
                                         "id": tc.id,
                                         "name": tc.name,
+                                        "input": {},
                                     },
                                 },
                             )
@@ -364,6 +373,7 @@ class OpenRouterProvider:
                                         "type": "tool_use",
                                         "id": t["id"],
                                         "name": t["name"],
+                                        "input": {},
                                     },
                                 },
                             )
@@ -438,12 +448,13 @@ class OpenRouterProvider:
                 },
                 "usage": {
                     "input_tokens": usage.get("prompt_tokens", 0) if usage else 0,
+                    "cache_creation_input_tokens": 0,
+                    "cache_read_input_tokens": 0,
                     "output_tokens": usage.get("completion_tokens", 0) if usage else 0,
                 },
             },
         )
         yield self._sse("message_stop", {"type": "message_stop"})
-        yield "data: [DONE]\n\n"
 
     def _sse(self, event: str, data: dict[str, Any]) -> str:
         return f"event: {event}\ndata: {json.dumps(data)}\n\n"

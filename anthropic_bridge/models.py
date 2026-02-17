@@ -1,4 +1,3 @@
-from dataclasses import dataclass
 from typing import Any, Literal, TypedDict
 
 
@@ -53,17 +52,3 @@ class OpenRouterRequest(TypedDict, total=False):
     stream_options: dict[str, bool]
     include_reasoning: bool
     thinking: dict[str, Any]
-
-
-@dataclass
-class ToolCall:
-    id: str
-    name: str
-    arguments: dict[str, Any]
-
-
-@dataclass
-class ProviderResult:
-    cleaned_text: str
-    extracted_tool_calls: list[ToolCall]
-    was_transformed: bool

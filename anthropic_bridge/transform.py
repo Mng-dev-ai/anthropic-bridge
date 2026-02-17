@@ -11,7 +11,6 @@ DROP_KEYS = [
     "stream_options",
     "logprobs",
     "top_logprobs",
-    "user",
     "response_format",
     "service_tier",
     "parallel_tool_calls",
@@ -29,9 +28,6 @@ def remove_uri_format(schema: Any) -> Any:
 
     if schema.get("type") == "string" and schema.get("format") == "uri":
         return {k: v for k, v in schema.items() if k != "format"}
-
-    if isinstance(schema, list):
-        return [remove_uri_format(item) for item in schema]
 
     result: dict[str, Any] = {}
     for key, value in schema.items():
