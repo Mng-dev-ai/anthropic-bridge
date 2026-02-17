@@ -36,9 +36,6 @@ class OpenAIProvider:
                 "store": False,
             }
 
-            if payload.get("temperature") is not None:
-                request_body["temperature"] = payload["temperature"]
-
             if tools:
                 request_body["tools"] = tools
 
