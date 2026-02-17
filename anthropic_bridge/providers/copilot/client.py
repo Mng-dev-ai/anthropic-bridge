@@ -17,7 +17,7 @@ from ..responses_api import (
     convert_tools_for_responses,
     stream_responses_api,
 )
-from ..utils import map_reasoning_effort
+from ..utils import map_reasoning_effort, yield_error_events
 from .auth import get_copilot_token
 
 COPILOT_CHAT_API_URL = "https://api.githubcopilot.com/chat/completions"
@@ -45,54 +45,24 @@ class CopilotProvider:
     async def handle(self, payload: dict[str, Any]) -> AsyncIterator[str]:
         token = self._get_token()
         if not token:
-            msg_id = f"msg_{int(time.time())}_{self._random_id()}"
-            yield self._sse(
-                "message_start",
-                {
-                    "type": "message_start",
-                    "message": {
-                        "id": msg_id,
-                        "type": "message",
-                        "role": "assistant",
-                        "content": [],
-                        "model": self.target_model,
-                        "stop_reason": None,
-                        "stop_sequence": None,
-                        "usage": {"input_tokens": 0, "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0, "output_tokens": 0},
-                    },
-                },
-            )
-            yield self._sse(
-                "error",
-                {
-                    "type": "error",
-                    "error": {
-                        "type": "authentication_error",
-                        "message": "GitHub Copilot token not found. Set GITHUB_COPILOT_TOKEN.",
-                    },
-                },
-            )
-            yield self._sse(
-                "message_delta",
-                {
-                    "type": "message_delta",
-                    "delta": {
-                        "stop_reason": "end_turn",
-                        "stop_sequence": None,
-                    },
-                    "usage": {"input_tokens": 0, "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0, "output_tokens": 0},
-                },
-            )
-            yield self._sse("message_stop", {"type": "message_stop"})
-            return
-
-        if self._should_use_responses_api():
-            async for event in self._handle_responses(payload, token):
+            async for event in yield_error_events(
+                "GitHub Copilot token not found. Set GITHUB_COPILOT_TOKEN.",
+                self.target_model,
+            ):
                 yield event
             return
 
-        async for event in self._handle_chat(payload, token):
-            yield event
+        try:
+            if self._should_use_responses_api():
+                async for event in self._handle_responses(payload, token):
+                    yield event
+                return
+
+            async for event in self._handle_chat(payload, token):
+                yield event
+        except Exception as e:
+            async for event in yield_error_events(str(e), self.target_model):
+                yield event
 
     async def _handle_responses(
         self, payload: dict[str, Any], token: str
