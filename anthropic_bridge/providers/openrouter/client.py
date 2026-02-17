@@ -13,6 +13,7 @@ from ...transform import (
     convert_anthropic_tool_choice_to_openai,
     convert_anthropic_tools_to_openai,
 )
+from ..utils import yield_error_events
 from .registry import ProviderRegistry
 
 OPENROUTER_API_URL = "https://openrouter.ai/api/v1/chat/completions"
@@ -32,34 +33,40 @@ class OpenRouterProvider:
         )
 
     async def handle(self, payload: dict[str, Any]) -> AsyncIterator[str]:
-        provider = self.provider_registry.get_provider()
-        if hasattr(provider, "reset"):
-            provider.reset()
+        try:
+            provider = self.provider_registry.get_provider()
+            if hasattr(provider, "reset"):
+                provider.reset()
 
-        messages = self._convert_messages(payload)
-        tools = convert_anthropic_tools_to_openai(payload.get("tools"))
+            messages = self._convert_messages(payload)
+            tools = convert_anthropic_tools_to_openai(payload.get("tools"))
 
-        openrouter_payload: dict[str, Any] = {
-            "model": self.target_model,
-            "messages": messages,
-            "temperature": payload.get("temperature", 1),
-            "stream": True,
-            "max_tokens": payload.get("max_tokens", 16000),
-            "stream_options": {"include_usage": True},
-        }
+            openrouter_payload: dict[str, Any] = {
+                "model": self.target_model,
+                "messages": messages,
+                "temperature": payload.get("temperature", 1),
+                "stream": True,
+                "max_tokens": payload.get("max_tokens", 16000),
+                "stream_options": {"include_usage": True},
+            }
 
-        if tools:
-            openrouter_payload["tools"] = tools
-            tool_choice = convert_anthropic_tool_choice_to_openai(
-                payload.get("tool_choice")
-            )
-            if tool_choice:
-                openrouter_payload["tool_choice"] = tool_choice
+            if tools:
+                openrouter_payload["tools"] = tools
+                tool_choice = convert_anthropic_tool_choice_to_openai(
+                    payload.get("tool_choice")
+                )
+                if tool_choice:
+                    openrouter_payload["tool_choice"] = tool_choice
 
-        if payload.get("thinking"):
-            openrouter_payload["include_reasoning"] = True
+            if payload.get("thinking"):
+                openrouter_payload["include_reasoning"] = True
 
-        provider.prepare_request(openrouter_payload, payload)
+            provider.prepare_request(openrouter_payload, payload)
+
+        except Exception as e:
+            async for event in yield_error_events(str(e), self.target_model):
+                yield event
+            return
 
         async for event in self._stream_openrouter(openrouter_payload, provider):
             yield event
