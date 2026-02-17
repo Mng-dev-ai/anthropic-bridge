@@ -45,6 +45,23 @@ class CopilotProvider:
     async def handle(self, payload: dict[str, Any]) -> AsyncIterator[str]:
         token = self._get_token()
         if not token:
+            msg_id = f"msg_{int(time.time())}_{self._random_id()}"
+            yield self._sse(
+                "message_start",
+                {
+                    "type": "message_start",
+                    "message": {
+                        "id": msg_id,
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [],
+                        "model": self.target_model,
+                        "stop_reason": None,
+                        "stop_sequence": None,
+                        "usage": {"input_tokens": 0, "output_tokens": 0},
+                    },
+                },
+            )
             yield self._sse(
                 "error",
                 {
@@ -53,6 +70,17 @@ class CopilotProvider:
                         "type": "authentication_error",
                         "message": "GitHub Copilot token not found. Set GITHUB_COPILOT_TOKEN.",
                     },
+                },
+            )
+            yield self._sse(
+                "message_delta",
+                {
+                    "type": "message_delta",
+                    "delta": {
+                        "stop_reason": "end_turn",
+                        "stop_sequence": None,
+                    },
+                    "usage": {"input_tokens": 0, "output_tokens": 0},
                 },
             )
             yield self._sse("message_stop", {"type": "message_stop"})
@@ -455,6 +483,17 @@ class CopilotProvider:
                 "error",
                 {"type": "error", "error": {"type": "api_error", "message": str(e)}},
             )
+            yield self._sse(
+                "message_delta",
+                {
+                    "type": "message_delta",
+                    "delta": {
+                        "stop_reason": "end_turn",
+                        "stop_sequence": None,
+                    },
+                    "usage": {"input_tokens": 0, "output_tokens": 0},
+                },
+            )
             yield self._sse("message_stop", {"type": "message_stop"})
             yield "data: [DONE]\n\n"
             return
@@ -505,12 +544,13 @@ class CopilotProvider:
                     {"type": "content_block_stop", "index": t["block_idx"]},
                 )
 
+        stop_reason = "tool_use" if tools else "end_turn"
         yield self._sse(
             "message_delta",
             {
                 "type": "message_delta",
                 "delta": {
-                    "stop_reason": "end_turn",
+                    "stop_reason": stop_reason,
                     "stop_sequence": None,
                 },
                 "usage": {
