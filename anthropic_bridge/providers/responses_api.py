@@ -332,8 +332,8 @@ async def stream_responses_api(
                         resp_usage = resp.get("usage", {})
                         usage = {
                             "input_tokens": resp_usage.get("input_tokens", 0),
-                            "cache_creation_input_tokens": 0,
-                            "cache_read_input_tokens": 0,
+                            "cache_creation_input_tokens": resp_usage.get("cache_creation_input_tokens", 0),
+                            "cache_read_input_tokens": resp_usage.get("cache_read_input_tokens", 0),
                             "output_tokens": resp_usage.get("output_tokens", 0),
                         }
                         break
@@ -402,7 +402,6 @@ async def stream_responses_api(
         },
     )
     yield _sse("message_stop", {"type": "message_stop"})
-    yield "data: [DONE]\n\n"
 
 
 def _sse(event: str, data: dict[str, Any]) -> str:

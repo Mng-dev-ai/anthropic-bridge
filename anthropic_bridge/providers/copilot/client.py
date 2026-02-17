@@ -554,8 +554,8 @@ class CopilotProvider:
                 },
                 "usage": {
                     "input_tokens": usage.get("prompt_tokens", 0) if usage else 0,
-                    "cache_creation_input_tokens": 0,
-                    "cache_read_input_tokens": 0,
+                    "cache_creation_input_tokens": usage.get("cache_creation_input_tokens", 0) if usage else 0,
+                    "cache_read_input_tokens": usage.get("cache_read_input_tokens", 0) if usage else 0,
                     "output_tokens": (
                         usage.get("completion_tokens", 0) if usage else 0
                     ),
@@ -563,7 +563,6 @@ class CopilotProvider:
             },
         )
         yield self._sse("message_stop", {"type": "message_stop"})
-        yield "data: [DONE]\n\n"
 
     def _sse(self, event: str, data: dict[str, Any]) -> str:
         return f"event: {event}\ndata: {json.dumps(data)}\n\n"
