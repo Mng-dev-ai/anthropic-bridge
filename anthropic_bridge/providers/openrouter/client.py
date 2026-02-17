@@ -166,6 +166,17 @@ class OpenRouterProvider:
                         },
                     },
                 )
+                yield self._sse(
+                    "message_delta",
+                    {
+                        "type": "message_delta",
+                        "delta": {
+                            "stop_reason": "end_turn",
+                            "stop_sequence": None,
+                        },
+                        "usage": {"input_tokens": 0, "output_tokens": 0},
+                    },
+                )
                 yield self._sse("message_stop", {"type": "message_stop"})
                 yield "data: [DONE]\n\n"
                 return
@@ -416,12 +427,13 @@ class OpenRouterProvider:
                 if self._is_gemini and current_reasoning_details:
                     get_reasoning_cache().set(t["id"], current_reasoning_details.copy())
 
+        stop_reason = "tool_use" if tools else "end_turn"
         yield self._sse(
             "message_delta",
             {
                 "type": "message_delta",
                 "delta": {
-                    "stop_reason": "end_turn",
+                    "stop_reason": stop_reason,
                     "stop_sequence": None,
                 },
                 "usage": {

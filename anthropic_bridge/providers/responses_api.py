@@ -330,6 +330,17 @@ async def stream_responses_api(
             "error",
             {"type": "error", "error": {"type": "api_error", "message": str(e)}},
         )
+        yield _sse(
+            "message_delta",
+            {
+                "type": "message_delta",
+                "delta": {
+                    "stop_reason": "end_turn",
+                    "stop_sequence": None,
+                },
+                "usage": {"input_tokens": 0, "output_tokens": 0},
+            },
+        )
         yield _sse("message_stop", {"type": "message_stop"})
         yield "data: [DONE]\n\n"
         return
@@ -361,12 +372,13 @@ async def stream_responses_api(
                 {"type": "content_block_stop", "index": t["block_idx"]},
             )
 
+    stop_reason = "tool_use" if tools else "end_turn"
     yield _sse(
         "message_delta",
         {
             "type": "message_delta",
             "delta": {
-                "stop_reason": "end_turn",
+                "stop_reason": stop_reason,
                 "stop_sequence": None,
             },
             "usage": usage,
