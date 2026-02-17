@@ -109,7 +109,12 @@ async def stream_responses_api(
                 "model": target_model,
                 "stop_reason": None,
                 "stop_sequence": None,
-                "usage": {"input_tokens": 0, "output_tokens": 0},
+                "usage": {
+                        "input_tokens": 0,
+                        "cache_creation_input_tokens": 0,
+                        "cache_read_input_tokens": 0,
+                        "output_tokens": 1,
+                    },
             },
         },
     )
@@ -121,7 +126,12 @@ async def stream_responses_api(
     thinking_idx = -1
     cur_idx = 0
     tools: dict[str, dict[str, Any]] = {}
-    usage: dict[str, int] = {"input_tokens": 0, "output_tokens": 0}
+    usage: dict[str, int] = {
+        "input_tokens": 0,
+        "cache_creation_input_tokens": 0,
+        "cache_read_input_tokens": 0,
+        "output_tokens": 0,
+    }
 
     try:
         async with httpx.AsyncClient(timeout=300.0) as client:
@@ -269,6 +279,7 @@ async def stream_responses_api(
                                         "type": "tool_use",
                                         "id": call_id,
                                         "name": name,
+                                        "input": {},
                                     },
                                 },
                             )
@@ -321,6 +332,8 @@ async def stream_responses_api(
                         resp_usage = resp.get("usage", {})
                         usage = {
                             "input_tokens": resp_usage.get("input_tokens", 0),
+                            "cache_creation_input_tokens": 0,
+                            "cache_read_input_tokens": 0,
                             "output_tokens": resp_usage.get("output_tokens", 0),
                         }
                         break
@@ -338,11 +351,15 @@ async def stream_responses_api(
                     "stop_reason": "end_turn",
                     "stop_sequence": None,
                 },
-                "usage": {"input_tokens": 0, "output_tokens": 0},
+                "usage": {
+                    "input_tokens": 0,
+                    "cache_creation_input_tokens": 0,
+                    "cache_read_input_tokens": 0,
+                    "output_tokens": 0,
+                },
             },
         )
         yield _sse("message_stop", {"type": "message_stop"})
-        yield "data: [DONE]\n\n"
         return
 
     if thinking_started:
