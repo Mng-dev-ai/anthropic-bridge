@@ -18,6 +18,22 @@ class OpenAIProvider:
         self._access_token: str | None = None
         self._account_id: str | None = None
         self._expires_at: float = 0
+        self._use_verbosity = self._supports_verbosity(self.target_model)
+
+    @staticmethod
+    def _supports_verbosity(model_id: str) -> bool:
+        lower = model_id.lower()
+        if lower.startswith("gpt-5"):
+            rest = lower.removeprefix("gpt-5")
+            if not rest or rest[0] == "-":
+                return True
+            if rest[0] == ".":
+                version_str = rest[1:].split("-")[0].split(".")[0]
+                try:
+                    return int(version_str) >= 3
+                except ValueError:
+                    return False
+        return False
 
     async def handle(self, payload: dict[str, Any]) -> AsyncIterator[str]:
         try:
@@ -45,6 +61,10 @@ class OpenAIProvider:
                 )
                 if effort:
                     request_body["reasoning"] = {"effort": effort, "summary": "auto"}
+
+            # GPT-5.3+ supports verbosity; default to "low" for coding use cases
+            if self._use_verbosity:
+                request_body["text"] = {"verbosity": "low"}
 
         except Exception as e:
             async for event in yield_error_events(str(e), self.target_model):

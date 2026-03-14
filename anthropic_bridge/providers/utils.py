@@ -72,14 +72,20 @@ def map_reasoning_effort(
     return None
 
 
+def normalize_model_id(model_id: str) -> str:
+    """Strip provider prefix and lowercase a model ID (e.g. 'openai/gpt-5.4' → 'gpt-5.4')."""
+    lower = model_id.lower()
+    if "/" in lower:
+        lower = lower.split("/", 1)[1]
+    return lower
+
+
 def _model_supports_xhigh(model_id: str | None) -> bool:
     if not model_id:
         return False
 
-    lower = model_id.lower()
-    if "/" in lower:
-        lower = lower.split("/", 1)[1]
+    lower = normalize_model_id(model_id)
 
     # OpenAI docs: xhigh is supported for gpt-5.1-codex-max and for models
-    # after gpt-5.1-codex-max (e.g., gpt-5.2, gpt-5.3 and their codex variants).
-    return lower.startswith(("gpt-5.1-codex-max", "gpt-5.2", "gpt-5.3"))
+    # after gpt-5.1-codex-max (e.g., gpt-5.2, gpt-5.3, gpt-5.4 and their codex variants).
+    return lower.startswith(("gpt-5.1-codex-max", "gpt-5.2", "gpt-5.3", "gpt-5.4"))
