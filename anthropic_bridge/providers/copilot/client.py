@@ -117,6 +117,10 @@ class CopilotProvider:
             "stream_options": {"include_usage": True},
         }
 
+        max_tokens = payload.get("max_tokens")
+        if max_tokens:
+            copilot_payload["max_tokens"] = max_tokens
+
         if payload.get("temperature") is not None:
             copilot_payload["temperature"] = payload["temperature"]
 
