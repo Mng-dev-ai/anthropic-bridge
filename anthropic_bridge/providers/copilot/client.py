@@ -77,6 +77,10 @@ class CopilotProvider:
             "stream": True,
         }
 
+        max_tokens = payload.get("max_tokens")
+        if max_tokens:
+            request_body["max_output_tokens"] = max_tokens
+
         if payload.get("temperature") is not None:
             request_body["temperature"] = payload["temperature"]
 
@@ -194,6 +198,9 @@ class CopilotProvider:
             "Content-Type": "application/json",
             "Authorization": f"Bearer {token}",
             "Openai-Intent": "conversation-edits",
+            "Editor-Version": "vscode/1.100.0",
+            "Editor-Plugin-Version": "copilot-chat/0.26.0",
+            "Copilot-Integration-Id": "vscode-chat",
             "x-initiator": "user",
             "User-Agent": "anthropic-bridge/0.1",
         }
