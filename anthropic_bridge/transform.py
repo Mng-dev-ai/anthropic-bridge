@@ -130,19 +130,24 @@ def convert_anthropic_tool_choice_to_openai(
     return "auto"
 
 
+def normalize_system_message(
+    system: str | list[dict[str, Any]] | None,
+) -> str | None:
+    if isinstance(system, list):
+        return "\n\n".join(
+            item.get("text", "") if isinstance(item, dict) else str(item)
+            for item in system
+        )
+    return system
+
+
 def convert_anthropic_messages_to_openai(
     messages: list[dict[str, Any]], system: str | list[dict[str, Any]] | None = None
 ) -> list[dict[str, Any]]:
     openai_messages: list[dict[str, Any]] = []
 
-    if system:
-        if isinstance(system, list):
-            system_text = "\n\n".join(
-                item.get("text", "") if isinstance(item, dict) else str(item)
-                for item in system
-            )
-        else:
-            system_text = system
+    system_text = normalize_system_message(system)
+    if system_text:
         openai_messages.append({"role": "system", "content": system_text})
 
     for msg in messages:

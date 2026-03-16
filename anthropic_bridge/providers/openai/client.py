@@ -3,6 +3,7 @@ from typing import Any
 
 from ..responses_api import (
     build_responses_input,
+    convert_tool_choice_for_responses,
     convert_tools_for_responses,
     stream_responses_api,
 )
@@ -46,14 +47,21 @@ class OpenAIProvider:
 
             request_body: dict[str, Any] = {
                 "model": self.target_model,
-                "instructions": instructions,
                 "input": input_messages,
                 "stream": True,
                 "store": False,
             }
 
+            if instructions:
+                request_body["instructions"] = instructions
+
             if tools:
                 request_body["tools"] = tools
+                tool_choice = convert_tool_choice_for_responses(
+                    payload.get("tool_choice")
+                )
+                if tool_choice:
+                    request_body["tool_choice"] = tool_choice
 
             if payload.get("thinking"):
                 effort = map_reasoning_effort(

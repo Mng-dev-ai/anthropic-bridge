@@ -1,8 +1,5 @@
 import asyncio
 import json
-import random
-import string
-import time
 from collections.abc import AsyncIterator
 from typing import Any
 
@@ -14,7 +11,13 @@ from ...transform import (
     convert_anthropic_tool_choice_to_openai,
     convert_anthropic_tools_to_openai,
 )
-from ..utils import estimate_input_tokens, yield_error_events
+from ..utils import (
+    AnthropicSSEEmitter,
+    estimate_input_tokens,
+    first_choice,
+    sse,
+    yield_error_events,
+)
 from .registry import ProviderRegistry
 
 OPENROUTER_API_URL = "https://openrouter.ai/api/v1/chat/completions"
@@ -35,9 +38,7 @@ class OpenRouterProvider:
 
     async def handle(self, payload: dict[str, Any]) -> AsyncIterator[str]:
         try:
-            provider = self.provider_registry.get_provider()
-            if hasattr(provider, "reset"):
-                provider.reset()
+            self.provider_registry.reset()
 
             messages = self._convert_messages(payload)
             tools = convert_anthropic_tools_to_openai(payload.get("tools"))
@@ -62,30 +63,23 @@ class OpenRouterProvider:
             if payload.get("thinking"):
                 openrouter_payload["include_reasoning"] = True
 
-            provider.prepare_request(openrouter_payload, payload)
+            self.provider_registry.prepare_request(openrouter_payload, payload)
 
         except Exception as e:
             async for event in yield_error_events(str(e), self.target_model):
                 yield event
             return
 
-        async for event in self._stream_openrouter(openrouter_payload, provider):
+        async for event in self._stream_openrouter(openrouter_payload):
             yield event
 
     def _convert_messages(self, payload: dict[str, Any]) -> list[dict[str, Any]]:
-        system = payload.get("system")
-        if isinstance(system, list):
-            system = "\n\n".join(
-                item.get("text", "") if isinstance(item, dict) else str(item)
-                for item in system
-            )
-
         messages = convert_anthropic_messages_to_openai(
-            payload.get("messages", []), system
+            payload.get("messages", []), payload.get("system")
         )
 
         if self._is_gemini:
-            self._inject_gemini_reasoning(messages, payload.get("messages", []))
+            self._inject_gemini_reasoning(messages)
 
         if "grok" in self.target_model.lower() or "x-ai" in self.target_model.lower():
             instruction = (
@@ -102,7 +96,6 @@ class OpenRouterProvider:
     def _inject_gemini_reasoning(
         self,
         openai_messages: list[dict[str, Any]],
-        anthropic_messages: list[dict[str, Any]],
     ) -> None:
         cache = get_reasoning_cache()
         for msg in openai_messages:
@@ -115,47 +108,26 @@ class OpenRouterProvider:
                 if cached:
                     if "reasoning_details" not in msg:
                         msg["reasoning_details"] = []
-                    msg["reasoning_details"].extend(cached)
+                    self._append_unique_reasoning_details(
+                        msg["reasoning_details"], cached
+                    )
 
     async def _stream_openrouter(
-        self, payload: dict[str, Any], provider: Any
+        self, payload: dict[str, Any]
     ) -> AsyncIterator[str]:
-        msg_id = f"msg_{int(time.time())}_{self._random_id()}"
         estimated_input = await asyncio.to_thread(
-            estimate_input_tokens, payload.get("messages", [])
+            estimate_input_tokens,
+            payload.get("messages", []),
+            payload.get("tools"),
         )
 
-        yield self._sse(
-            "message_start",
-            {
-                "type": "message_start",
-                "message": {
-                    "id": msg_id,
-                    "type": "message",
-                    "role": "assistant",
-                    "content": [],
-                    "model": self.target_model,
-                    "stop_reason": None,
-                    "stop_sequence": None,
-                    "usage": {
-                        "input_tokens": estimated_input,
-                        "cache_creation_input_tokens": 0,
-                        "cache_read_input_tokens": 0,
-                        "output_tokens": 1,
-                    },
-                },
-            },
-        )
-        yield self._sse("ping", {"type": "ping"})
+        emitter = AnthropicSSEEmitter(self.target_model, estimated_input)
+        for _e in emitter.message_start():
+            yield _e
 
-        text_started = False
-        text_idx = -1
-        thinking_started = False
-        thinking_idx = -1
-        cur_idx = 0
-        tools: dict[int, dict[str, Any]] = {}
         usage: dict[str, Any] | None = None
         current_reasoning_details: list[dict[str, Any]] = []
+        had_error = False
 
         async with (
             httpx.AsyncClient(timeout=300.0) as client,
@@ -172,33 +144,8 @@ class OpenRouterProvider:
         ):
             if response.status_code != 200:
                 error_text = await response.aread()
-                yield self._sse(
-                    "error",
-                    {
-                        "type": "error",
-                        "error": {
-                            "type": "api_error",
-                            "message": error_text.decode(errors="replace"),
-                        },
-                    },
-                )
-                yield self._sse(
-                    "message_delta",
-                    {
-                        "type": "message_delta",
-                        "delta": {
-                            "stop_reason": "end_turn",
-                            "stop_sequence": None,
-                        },
-                        "usage": {
-                            "input_tokens": 0,
-                            "cache_creation_input_tokens": 0,
-                            "cache_read_input_tokens": 0,
-                            "output_tokens": 0,
-                        },
-                    },
-                )
-                yield self._sse("message_stop", {"type": "message_stop"})
+                for _e in emitter.error_and_finish(error_text.decode(errors="replace")):
+                    yield _e
                 return
 
             buffer = ""
@@ -221,130 +168,65 @@ class OpenRouterProvider:
                     except json.JSONDecodeError:
                         continue
 
+                    if data.get("error"):
+                        had_error = True
+                        error = data["error"]
+                        if isinstance(error, dict):
+                            message = error.get("message", "OpenRouter API error")
+                        else:
+                            message = str(error)
+                        yield sse(
+                            "error",
+                            {
+                                "type": "error",
+                                "error": {"type": "api_error", "message": message},
+                            },
+                        )
+                        continue
+
                     if data.get("usage"):
                         usage = data["usage"]
 
-                    delta = data.get("choices", [{}])[0].get("delta", {})
+                    choice = first_choice(data)
+                    if choice is None:
+                        continue
+
+                    delta = choice.get("delta", {})
+                    if not isinstance(delta, dict):
+                        delta = {}
 
                     if self._is_gemini and delta.get("reasoning_details"):
-                        current_reasoning_details.extend(delta["reasoning_details"])
+                        self._append_unique_reasoning_details(
+                            current_reasoning_details, delta["reasoning_details"]
+                        )
 
                     reasoning = delta.get("reasoning") or ""
                     content = delta.get("content") or ""
 
                     if reasoning:
-                        if not thinking_started:
-                            thinking_idx = cur_idx
-                            cur_idx += 1
-                            yield self._sse(
-                                "content_block_start",
-                                {
-                                    "type": "content_block_start",
-                                    "index": thinking_idx,
-                                    "content_block": {
-                                        "type": "thinking",
-                                        "thinking": "",
-                                        "signature": "",
-                                    },
-                                },
-                            )
-                            thinking_started = True
-
-                        yield self._sse(
-                            "content_block_delta",
-                            {
-                                "type": "content_block_delta",
-                                "index": thinking_idx,
-                                "delta": {
-                                    "type": "thinking_delta",
-                                    "thinking": reasoning,
-                                },
-                            },
-                        )
+                        for _e in emitter.thinking_delta(reasoning):
+                            yield _e
 
                     if content:
-                        if thinking_started:
-                            yield self._sse(
-                                "content_block_delta",
-                                {
-                                    "type": "content_block_delta",
-                                    "index": thinking_idx,
-                                    "delta": {
-                                        "type": "signature_delta",
-                                        "signature": "",
-                                    },
-                                },
-                            )
-                            yield self._sse(
-                                "content_block_stop",
-                                {"type": "content_block_stop", "index": thinking_idx},
-                            )
-                            thinking_started = False
+                        for _e in emitter.close_thinking():
+                            yield _e
 
-                        result = provider.process_text_content(content, "")
+                        result = self.provider_registry.process_text_content(content, "")
                         clean_text = result.cleaned_text
 
                         if clean_text:
-                            if not text_started:
-                                text_idx = cur_idx
-                                cur_idx += 1
-                                yield self._sse(
-                                    "content_block_start",
-                                    {
-                                        "type": "content_block_start",
-                                        "index": text_idx,
-                                        "content_block": {"type": "text", "text": ""},
-                                    },
-                                )
-                                text_started = True
-
-                            yield self._sse(
-                                "content_block_delta",
-                                {
-                                    "type": "content_block_delta",
-                                    "index": text_idx,
-                                    "delta": {"type": "text_delta", "text": clean_text},
-                                },
-                            )
+                            for _e in emitter.text_delta(clean_text):
+                                yield _e
 
                         for tc in result.extracted_tool_calls:
-                            if text_started:
-                                yield self._sse(
-                                    "content_block_stop",
-                                    {"type": "content_block_stop", "index": text_idx},
-                                )
-                                text_started = False
-
-                            tool_idx = cur_idx
-                            cur_idx += 1
-                            yield self._sse(
-                                "content_block_start",
-                                {
-                                    "type": "content_block_start",
-                                    "index": tool_idx,
-                                    "content_block": {
-                                        "type": "tool_use",
-                                        "id": tc.id,
-                                        "name": tc.name,
-                                        "input": {},
-                                    },
-                                },
-                            )
-                            yield self._sse(
-                                "content_block_delta",
-                                {
-                                    "type": "content_block_delta",
-                                    "index": tool_idx,
-                                    "delta": {
-                                        "type": "input_json_delta",
-                                        "partial_json": json.dumps(tc.arguments),
-                                    },
-                                },
-                            )
-                            yield self._sse(
-                                "content_block_stop",
-                                {"type": "content_block_stop", "index": tool_idx},
-                            )
+                            for _e in emitter.close_text():
+                                yield _e
+                            for _e in emitter.add_tool(tc.id, tc.id, tc.name):
+                                yield _e
+                            for _e in emitter.tool_delta(tc.id, json.dumps(tc.arguments)):
+                                yield _e
+                            for _e in emitter.close_tool(tc.id):
+                                yield _e
                             if self._is_gemini and current_reasoning_details:
                                 get_reasoning_cache().set(
                                     tc.id, current_reasoning_details.copy()
@@ -353,122 +235,72 @@ class OpenRouterProvider:
                     tool_calls = delta.get("tool_calls", [])
                     for tc in tool_calls:
                         idx = tc.get("index", 0)
-                        if idx not in tools:
-                            if text_started:
-                                yield self._sse(
-                                    "content_block_stop",
-                                    {"type": "content_block_stop", "index": text_idx},
-                                )
-                                text_started = False
+                        if emitter.get_tool(idx) is None:
+                            tool_id = tc.get("id") or f"tool_{idx}"
+                            for _e in emitter.register_tool(idx, tool_id):
+                                yield _e
 
-                            tools[idx] = {
-                                "id": tc.get("id") or f"tool_{int(time.time())}_{idx}",
-                                "name": tc.get("function", {}).get("name", ""),
-                                "block_idx": cur_idx,
-                                "started": False,
-                                "closed": False,
-                            }
-                            cur_idx += 1
-
-                        t = tools[idx]
                         fn = tc.get("function", {})
+                        if fn.get("name"):
+                            for _e in emitter.start_tool(idx, fn["name"]):
+                                yield _e
 
-                        if fn.get("name") and not t["started"]:
-                            t["name"] = fn["name"]
-                            yield self._sse(
-                                "content_block_start",
-                                {
-                                    "type": "content_block_start",
-                                    "index": t["block_idx"],
-                                    "content_block": {
-                                        "type": "tool_use",
-                                        "id": t["id"],
-                                        "name": t["name"],
-                                        "input": {},
-                                    },
-                                },
-                            )
-                            t["started"] = True
+                        tool_entry = emitter.get_tool(idx)
+                        if fn.get("arguments") and tool_entry and tool_entry["started"]:
+                            for _e in emitter.tool_delta(idx, fn["arguments"]):
+                                yield _e
 
-                        if fn.get("arguments") and t["started"]:
-                            yield self._sse(
-                                "content_block_delta",
-                                {
-                                    "type": "content_block_delta",
-                                    "index": t["block_idx"],
-                                    "delta": {
-                                        "type": "input_json_delta",
-                                        "partial_json": fn["arguments"],
-                                    },
-                                },
-                            )
-
-                    finish = data.get("choices", [{}])[0].get("finish_reason")
+                    finish = choice.get("finish_reason")
                     if finish == "tool_calls":
-                        for t in tools.values():
-                            if t["started"] and not t["closed"]:
-                                yield self._sse(
-                                    "content_block_stop",
-                                    {
-                                        "type": "content_block_stop",
-                                        "index": t["block_idx"],
-                                    },
+                        for key in emitter.tool_keys:
+                            for _e in emitter.close_tool(key):
+                                yield _e
+                            t = emitter.get_tool(key)
+                            if t and self._is_gemini and current_reasoning_details:
+                                get_reasoning_cache().set(
+                                    t["id"], current_reasoning_details.copy()
                                 )
-                                t["closed"] = True
-                                if self._is_gemini and current_reasoning_details:
-                                    get_reasoning_cache().set(
-                                        t["id"], current_reasoning_details.copy()
-                                    )
 
-        if thinking_started:
-            yield self._sse(
-                "content_block_delta",
-                {
-                    "type": "content_block_delta",
-                    "index": thinking_idx,
-                    "delta": {"type": "signature_delta", "signature": ""},
-                },
-            )
-            yield self._sse(
-                "content_block_stop",
-                {"type": "content_block_stop", "index": thinking_idx},
-            )
-
-        if text_started:
-            yield self._sse(
-                "content_block_stop", {"type": "content_block_stop", "index": text_idx}
-            )
-
-        for t in tools.values():
-            if t["started"] and not t["closed"]:
-                yield self._sse(
-                    "content_block_stop",
-                    {"type": "content_block_stop", "index": t["block_idx"]},
-                )
-                if self._is_gemini and current_reasoning_details:
+        # Cache reasoning details for tools closed at stream end
+        if self._is_gemini and current_reasoning_details:
+            for key in emitter.tool_keys:
+                t = emitter.get_tool(key)
+                if t and not t["closed"]:
                     get_reasoning_cache().set(t["id"], current_reasoning_details.copy())
 
-        stop_reason = "tool_use" if tools else "end_turn"
-        yield self._sse(
-            "message_delta",
-            {
-                "type": "message_delta",
-                "delta": {
-                    "stop_reason": stop_reason,
-                    "stop_sequence": None,
+        if not emitter.had_content and not emitter.has_tools and not had_error:
+            yield sse(
+                "error",
+                {
+                    "type": "error",
+                    "error": {
+                        "type": "api_error",
+                        "message": (
+                            f"No content received from OpenRouter API for model "
+                            f"'{self.target_model}'. The provider may be rate-limited "
+                            f"or the model may not be available."
+                        ),
+                    },
                 },
-                "usage": {
-                    "input_tokens": usage.get("prompt_tokens", 0) if usage else 0,
-                    "cache_creation_input_tokens": usage.get("cache_creation_input_tokens", 0) if usage else 0,
-                    "cache_read_input_tokens": usage.get("cache_read_input_tokens", 0) if usage else 0,
-                    "output_tokens": usage.get("completion_tokens", 0) if usage else 0,
-                },
-            },
-        )
-        yield self._sse("message_stop", {"type": "message_stop"})
+            )
 
-    def _sse(self, event: str, data: dict[str, Any]) -> str:
-        return f"event: {event}\ndata: {json.dumps(data)}\n\n"
+        usage_summary = usage or {}
+        for _e in emitter.finish({
+            "input_tokens": usage_summary.get("prompt_tokens", 0),
+            "cache_creation_input_tokens": usage_summary.get("cache_creation_input_tokens", 0),
+            "cache_read_input_tokens": usage_summary.get("cache_read_input_tokens", 0),
+            "output_tokens": usage_summary.get("completion_tokens", 0),
+        }):
+            yield _e
 
-    def _random_id(self) -> str:
-        return "".join(random.choices(string.ascii_lowercase + string.digits, k=12))
+    @staticmethod
+    def _append_unique_reasoning_details(
+        target: list[dict[str, Any]], details: list[dict[str, Any]]
+    ) -> None:
+        seen = {json.dumps(item, sort_keys=True) for item in target}
+        for item in details:
+            encoded = json.dumps(item, sort_keys=True)
+            if encoded in seen:
+                continue
+            target.append(item)
+            seen.add(encoded)

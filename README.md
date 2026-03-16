@@ -5,12 +5,13 @@ A proxy server that exposes an Anthropic Messages API-compatible endpoint while 
 ## Features
 
 - Anthropic Messages API compatible (`/v1/messages`)
-- Streaming SSE responses
+- JSON responses by default, SSE when `stream: true`
 - Tool/function calling support
 - Multi-round conversations
 - Support for multiple providers: OpenAI, GitHub Copilot, OpenRouter (Gemini, Grok, DeepSeek, Qwen, MiniMax, etc.)
 - Extended thinking/reasoning support for compatible models
 - Reasoning cache for Gemini models across tool call rounds
+- Approximate `/v1/messages/count_tokens` support
 
 ## Installation
 
@@ -48,7 +49,7 @@ client = Anthropic(
 
 # OpenAI (via ChatGPT subscription)
 response = client.messages.create(
-    model="openai/gpt-5.3-codex",
+    model="openai/gpt-5.2",
     max_tokens=1024,
     messages=[{"role": "user", "content": "Hello!"}]
 )
@@ -62,11 +63,13 @@ response = client.messages.create(
 
 # OpenRouter
 response = client.messages.create(
-    model="openrouter/google/gemini-2.5-pro-preview",
+    model="openrouter/google/gemini-3-pro-preview",
     max_tokens=1024,
     messages=[{"role": "user", "content": "Hello!"}]
 )
 ```
+
+`client.messages.create(...)` works as a normal non-streaming Anthropic request. If you send `stream=True`, the bridge returns Anthropic-compatible SSE events.
 
 ### Thinking/Reasoning
 
@@ -74,7 +77,7 @@ Use the `thinking` parameter to control reasoning effort (supported on OpenAI an
 
 ```python
 response = client.messages.create(
-    model="openai/gpt-5.3-codex",
+    model="openai/gpt-5.2",
     max_tokens=1024,
     thinking={"budget_tokens": 15000},  # Maps to "high" effort
     messages=[{"role": "user", "content": "Solve this problem..."}]
@@ -94,8 +97,8 @@ response = client.messages.create(
 |----------|--------|-------------|
 | `/` | GET | Health check |
 | `/health` | GET | Health check |
-| `/v1/messages` | POST | Anthropic Messages API |
-| `/v1/messages/count_tokens` | POST | Token counting (approximate) |
+| `/v1/messages` | POST | Anthropic Messages API. Returns JSON unless `stream: true` is set. |
+| `/v1/messages/count_tokens` | POST | Approximate token counting for structured Anthropic inputs. |
 
 ## Configuration
 
@@ -118,24 +121,22 @@ OpenAI models (`openai/*`) authenticate via the Codex CLI auth file (`~/.codex/a
 - `openai/*` → Direct OpenAI API (via Codex CLI auth)
 - `copilot/*` → GitHub Copilot API (via `GITHUB_COPILOT_TOKEN`)
 - `openrouter/*` → OpenRouter API (via `OPENROUTER_API_KEY`)
-- Any other model → Falls back to OpenRouter
+- Any other model → Falls back in this order: OpenRouter, Copilot, OpenAI
 
-## Supported Models
+Explicit prefixes are strict. If you request `openai/*`, `copilot/*`, or `openrouter/*` and that backend is not configured, the bridge returns an authentication/configuration error instead of silently rerouting to another provider.
 
-### OpenAI (via ChatGPT subscription)
+## Architecture
 
-- `openai/gpt-5.3-codex` - Codex 5.3
-- `openai/gpt-5.2-codex` - Codex 5.2
+- `server.py` owns provider selection, Anthropic route handling, SSE passthrough, and non-stream aggregation.
+- `providers/openrouter/client.py` handles OpenRouter chat-completions streaming and provider-specific request tweaks.
+- `providers/openai/client.py` and `providers/copilot/client.py` translate Anthropic requests onto Responses API or chat-completions style upstream APIs.
+- `transform.py` converts Anthropic messages, tools, and tool choice into the upstream shapes used by the providers.
 
-### GitHub Copilot (via GitHub Copilot subscription)
+## Provider Notes
 
-- `copilot/gpt-5.3-codex` - Codex 5.3
-- `copilot/claude-opus-4.6` - Claude Opus 4.6
-- `copilot/gemini-3-pro` - Gemini 3 Pro
+This project does not keep a frozen catalog of upstream model IDs. Use the provider prefixes with the model IDs currently offered by that provider.
 
-### OpenRouter
-
-Any model available on OpenRouter can be used with the `openrouter/` prefix. Provider-specific optimizations exist for:
+Provider-specific optimizations currently exist for:
 
 - **Google Gemini** (`openrouter/google/*`) - Reasoning detail caching
 - **OpenAI** (`openrouter/openai/*`) - Extended thinking support
@@ -143,6 +144,10 @@ Any model available on OpenRouter can be used with the `openrouter/` prefix. Pro
 - **DeepSeek** (`openrouter/deepseek/*`)
 - **Qwen** (`openrouter/qwen/*`)
 - **MiniMax** (`openrouter/minimax/*`)
+
+## Development
+
+`pytest tests/ -v` runs the deterministic test suite by default. Live upstream tests are opt-in and require `ANTHROPIC_BRIDGE_LIVE_TESTS=1`.
 
 ## License
 

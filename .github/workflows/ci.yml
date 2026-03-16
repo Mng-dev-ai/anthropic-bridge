@@ -29,6 +29,4 @@ jobs:
         run: mypy anthropic_bridge/
 
       - name: Run tests
-        env:
-          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
         run: pytest tests/ -v

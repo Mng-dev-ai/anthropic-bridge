@@ -1,8 +1,5 @@
 import asyncio
 import json
-import random
-import string
-import time
 from collections.abc import AsyncIterator
 from typing import Any
 
@@ -15,10 +12,18 @@ from ...transform import (
 )
 from ..responses_api import (
     build_responses_input,
+    convert_tool_choice_for_responses,
     convert_tools_for_responses,
     stream_responses_api,
 )
-from ..utils import estimate_input_tokens, map_reasoning_effort, yield_error_events
+from ..utils import (
+    AnthropicSSEEmitter,
+    estimate_input_tokens,
+    first_choice,
+    map_reasoning_effort,
+    sse,
+    yield_error_events,
+)
 from .auth import get_copilot_token
 
 COPILOT_CHAT_API_URL = "https://api.githubcopilot.com/chat/completions"
@@ -73,10 +78,12 @@ class CopilotProvider:
 
         request_body: dict[str, Any] = {
             "model": self.target_model,
-            "instructions": instructions,
             "input": input_messages,
             "stream": True,
         }
+
+        if instructions:
+            request_body["instructions"] = instructions
 
         max_tokens = payload.get("max_tokens")
         if max_tokens:
@@ -87,6 +94,9 @@ class CopilotProvider:
 
         if tools:
             request_body["tools"] = tools
+            tool_choice = convert_tool_choice_for_responses(payload.get("tool_choice"))
+            if tool_choice:
+                request_body["tool_choice"] = tool_choice
 
         if payload.get("thinking"):
             effort = map_reasoning_effort(
@@ -148,14 +158,8 @@ class CopilotProvider:
             yield event
 
     def _convert_messages(self, payload: dict[str, Any]) -> list[dict[str, Any]]:
-        system = payload.get("system")
-        if isinstance(system, list):
-            system = "\n\n".join(
-                item.get("text", "") if isinstance(item, dict) else str(item)
-                for item in system
-            )
         messages = convert_anthropic_messages_to_openai(
-            payload.get("messages", []), system
+            payload.get("messages", []), payload.get("system")
         )
         self._inject_reasoning_fields(payload.get("messages", []), messages)
         return messages
@@ -213,37 +217,17 @@ class CopilotProvider:
     async def _stream_chat(
         self, payload: dict[str, Any], token: str
     ) -> AsyncIterator[str]:
-        msg_id = f"msg_{int(time.time())}_{self._random_id()}"
         estimated_input = await asyncio.to_thread(
-            estimate_input_tokens, payload.get("messages", [])
+            estimate_input_tokens,
+            payload.get("messages", []),
+            payload.get("tools"),
         )
 
-        yield self._sse(
-            "message_start",
-            {
-                "type": "message_start",
-                "message": {
-                    "id": msg_id,
-                    "type": "message",
-                    "role": "assistant",
-                    "content": [],
-                    "model": self.target_model,
-                    "stop_reason": None,
-                    "stop_sequence": None,
-                    "usage": {"input_tokens": estimated_input, "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0, "output_tokens": 0},
-                },
-            },
-        )
-        yield self._sse("ping", {"type": "ping"})
+        emitter = AnthropicSSEEmitter(self.target_model, estimated_input)
+        for _e in emitter.message_start():
+            yield _e
 
-        text_started = False
-        text_idx = -1
-        thinking_started = False
-        thinking_idx = -1
-        cur_idx = 0
-        tools: dict[int, dict[str, Any]] = {}
         usage: dict[str, Any] | None = None
-        had_content = False
         reasoning_opaque: str | None = None
 
         try:
@@ -309,7 +293,13 @@ class CopilotProvider:
                         if data.get("usage"):
                             usage = data["usage"]
 
-                        delta = data.get("choices", [{}])[0].get("delta", {})
+                        choice = first_choice(data)
+                        if choice is None:
+                            continue
+
+                        delta = choice.get("delta", {})
+                        if not isinstance(delta, dict):
+                            delta = {}
 
                         if delta.get("reasoning_opaque"):
                             reasoning_opaque = delta["reasoning_opaque"]
@@ -318,172 +308,46 @@ class CopilotProvider:
                         content = delta.get("content") or ""
 
                         if reasoning:
-                            had_content = True
-                            if not thinking_started:
-                                thinking_idx = cur_idx
-                                cur_idx += 1
-                                yield self._sse(
-                                    "content_block_start",
-                                    {
-                                        "type": "content_block_start",
-                                        "index": thinking_idx,
-                                        "content_block": {
-                                            "type": "thinking",
-                                            "thinking": "",
-                                            "signature": "",
-                                        },
-                                    },
-                                )
-                                thinking_started = True
-
-                            yield self._sse(
-                                "content_block_delta",
-                                {
-                                    "type": "content_block_delta",
-                                    "index": thinking_idx,
-                                    "delta": {
-                                        "type": "thinking_delta",
-                                        "thinking": reasoning,
-                                    },
-                                },
-                            )
+                            for _e in emitter.thinking_delta(reasoning):
+                                yield _e
 
                         if content:
-                            had_content = True
-                            if thinking_started:
-                                yield self._sse(
-                                    "content_block_delta",
-                                    {
-                                        "type": "content_block_delta",
-                                        "index": thinking_idx,
-                                        "delta": {
-                                            "type": "signature_delta",
-                                            "signature": reasoning_opaque or "",
-                                        },
-                                    },
-                                )
-                                yield self._sse(
-                                    "content_block_stop",
-                                    {
-                                        "type": "content_block_stop",
-                                        "index": thinking_idx,
-                                    },
-                                )
-                                thinking_started = False
-
-                            if not text_started:
-                                text_idx = cur_idx
-                                cur_idx += 1
-                                yield self._sse(
-                                    "content_block_start",
-                                    {
-                                        "type": "content_block_start",
-                                        "index": text_idx,
-                                        "content_block": {"type": "text", "text": ""},
-                                    },
-                                )
-                                text_started = True
-
-                            yield self._sse(
-                                "content_block_delta",
-                                {
-                                    "type": "content_block_delta",
-                                    "index": text_idx,
-                                    "delta": {"type": "text_delta", "text": content},
-                                },
-                            )
+                            for _e in emitter.close_thinking(reasoning_opaque or ""):
+                                yield _e
+                            for _e in emitter.text_delta(content):
+                                yield _e
 
                         tool_calls = delta.get("tool_calls", [])
                         for tc in tool_calls:
-                            had_content = True
                             idx = tc.get("index", 0)
-                            if idx not in tools:
-                                if text_started:
-                                    yield self._sse(
-                                        "content_block_stop",
-                                        {
-                                            "type": "content_block_stop",
-                                            "index": text_idx,
-                                        },
-                                    )
-                                    text_started = False
+                            if emitter.get_tool(idx) is None:
+                                tool_id = tc.get("id") or f"tool_{idx}"
+                                for _e in emitter.register_tool(idx, tool_id):
+                                    yield _e
 
-                                tools[idx] = {
-                                    "id": tc.get("id") or f"tool_{int(time.time())}_{idx}",
-                                    "name": tc.get("function", {}).get("name", ""),
-                                    "block_idx": cur_idx,
-                                    "started": False,
-                                    "closed": False,
-                                }
-                                cur_idx += 1
-
-                            t = tools[idx]
                             fn = tc.get("function", {})
+                            if fn.get("name"):
+                                for _e in emitter.start_tool(idx, fn["name"]):
+                                    yield _e
 
-                            if fn.get("name") and not t["started"]:
-                                t["name"] = fn["name"]
-                                yield self._sse(
-                                    "content_block_start",
-                                    {
-                                        "type": "content_block_start",
-                                        "index": t["block_idx"],
-                                        "content_block": {
-                                            "type": "tool_use",
-                                            "id": t["id"],
-                                            "name": t["name"],
-                                            "input": {},
-                                        },
-                                    },
-                                )
-                                t["started"] = True
+                            tool_entry = emitter.get_tool(idx)
+                            if fn.get("arguments") and tool_entry and tool_entry["started"]:
+                                for _e in emitter.tool_delta(idx, fn["arguments"]):
+                                    yield _e
 
-                            if fn.get("arguments") and t["started"]:
-                                yield self._sse(
-                                    "content_block_delta",
-                                    {
-                                        "type": "content_block_delta",
-                                        "index": t["block_idx"],
-                                        "delta": {
-                                            "type": "input_json_delta",
-                                            "partial_json": fn["arguments"],
-                                        },
-                                    },
-                                )
-
-                        finish = data.get("choices", [{}])[0].get("finish_reason")
+                        finish = choice.get("finish_reason")
                         if finish == "tool_calls":
-                            for t in tools.values():
-                                if t["started"] and not t["closed"]:
-                                    yield self._sse(
-                                        "content_block_stop",
-                                        {
-                                            "type": "content_block_stop",
-                                            "index": t["block_idx"],
-                                        },
-                                    )
-                                    t["closed"] = True
+                            for key in emitter.tool_keys:
+                                for _e in emitter.close_tool(key):
+                                    yield _e
 
         except Exception as e:
-            yield self._sse(
-                "error",
-                {"type": "error", "error": {"type": "api_error", "message": str(e)}},
-            )
-            yield self._sse(
-                "message_delta",
-                {
-                    "type": "message_delta",
-                    "delta": {
-                        "stop_reason": "end_turn",
-                        "stop_sequence": None,
-                    },
-                    "usage": {"input_tokens": 0, "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0, "output_tokens": 0},
-                },
-            )
-            yield self._sse("message_stop", {"type": "message_stop"})
+            for _e in emitter.error_and_finish(str(e)):
+                yield _e
             return
 
-        if not had_content and not tools:
-            yield self._sse(
+        if not emitter.had_content and not emitter.has_tools:
+            yield sse(
                 "error",
                 {
                     "type": "error",
@@ -498,59 +362,13 @@ class CopilotProvider:
                 },
             )
 
-        if thinking_started:
-            yield self._sse(
-                "content_block_delta",
-                {
-                    "type": "content_block_delta",
-                    "index": thinking_idx,
-                    "delta": {
-                        "type": "signature_delta",
-                        "signature": reasoning_opaque or "",
-                    },
-                },
-            )
-            yield self._sse(
-                "content_block_stop",
-                {"type": "content_block_stop", "index": thinking_idx},
-            )
-
-        if text_started:
-            yield self._sse(
-                "content_block_stop",
-                {"type": "content_block_stop", "index": text_idx},
-            )
-
-        for t in tools.values():
-            if t["started"] and not t["closed"]:
-                yield self._sse(
-                    "content_block_stop",
-                    {"type": "content_block_stop", "index": t["block_idx"]},
-                )
-
-        stop_reason = "tool_use" if tools else "end_turn"
-        yield self._sse(
-            "message_delta",
+        for _e in emitter.finish(
             {
-                "type": "message_delta",
-                "delta": {
-                    "stop_reason": stop_reason,
-                    "stop_sequence": None,
-                },
-                "usage": {
-                    "input_tokens": usage.get("prompt_tokens", 0) if usage else 0,
-                    "cache_creation_input_tokens": usage.get("cache_creation_input_tokens", 0) if usage else 0,
-                    "cache_read_input_tokens": usage.get("cache_read_input_tokens", 0) if usage else 0,
-                    "output_tokens": (
-                        usage.get("completion_tokens", 0) if usage else 0
-                    ),
-                },
+                "input_tokens": usage.get("prompt_tokens", 0) if usage else 0,
+                "cache_creation_input_tokens": usage.get("cache_creation_input_tokens", 0) if usage else 0,
+                "cache_read_input_tokens": usage.get("cache_read_input_tokens", 0) if usage else 0,
+                "output_tokens": usage.get("completion_tokens", 0) if usage else 0,
             },
-        )
-        yield self._sse("message_stop", {"type": "message_stop"})
-
-    def _sse(self, event: str, data: dict[str, Any]) -> str:
-        return f"event: {event}\ndata: {json.dumps(data)}\n\n"
-
-    def _random_id(self) -> str:
-        return "".join(random.choices(string.ascii_lowercase + string.digits, k=12))
+            signature=reasoning_opaque or "",
+        ):
+            yield _e

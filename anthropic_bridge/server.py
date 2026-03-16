@@ -1,4 +1,3 @@
-import json
 from dataclasses import dataclass
 from typing import Literal
 
@@ -7,6 +6,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from .cache import get_reasoning_cache
+from .protocol import collect_anthropic_response, estimate_anthropic_input_tokens
 from .providers import CopilotProvider, OpenAIProvider, OpenRouterProvider
 from .providers.openai.auth import auth_file_exists
 
@@ -50,8 +50,7 @@ class AnthropicBridge:
         @self.app.post("/v1/messages/count_tokens")
         async def count_tokens(request: Request) -> JSONResponse:
             body = await request.json()
-            text = json.dumps(body)
-            return JSONResponse({"input_tokens": len(text) // 4})
+            return JSONResponse({"input_tokens": estimate_anthropic_input_tokens(body)})
 
         @self.app.post("/v1/messages", response_model=None)
         async def messages(request: Request) -> StreamingResponse | JSONResponse:
@@ -65,10 +64,27 @@ class AnthropicBridge:
                     content={
                         "error": {
                             "type": "authentication_error",
-                            "message": "No provider configured. Set OPENROUTER_API_KEY, GITHUB_COPILOT_TOKEN, or configure OpenAI auth.",
+                            "message": self._get_provider_error_message(model),
                         }
                     },
                 )
+
+            if body.get("stream") is not True:
+                message, error = await collect_anthropic_response(provider.handle(body))
+                if error:
+                    return JSONResponse(status_code=502, content=error)
+                if message is None:
+                    return JSONResponse(
+                        status_code=502,
+                        content={
+                            "type": "error",
+                            "error": {
+                                "type": "api_error",
+                                "message": "Provider returned no message.",
+                            },
+                        },
+                    )
+                return JSONResponse(message)
 
             return StreamingResponse(
                 provider.handle(body),
@@ -83,19 +99,30 @@ class AnthropicBridge:
 
         if requested_provider:
             requested_model = self._model_for_provider(model, requested_provider)
-            provider = self._make_provider(requested_model, requested_provider)
-            if provider:
-                return provider
+            return self._make_provider(requested_model, requested_provider)
 
         for provider_type in ("openrouter", "copilot", "openai"):
-            if provider_type == requested_provider:
-                continue
             provider_model = self._model_for_provider(model, provider_type)
             provider = self._make_provider(provider_model, provider_type)
             if provider:
                 return provider
 
         return None
+
+    def _get_provider_error_message(self, model: str) -> str:
+        requested_provider = self._get_requested_provider(model)
+        if requested_provider is None:
+            return (
+                "No provider configured. Set OPENROUTER_API_KEY, "
+                "GITHUB_COPILOT_TOKEN, or configure OpenAI auth."
+            )
+
+        messages = {
+            "openai": "OpenAI auth not configured. Run 'codex login' to use openai/* models.",
+            "copilot": "GitHub Copilot token not configured. Set GITHUB_COPILOT_TOKEN to use copilot/* models.",
+            "openrouter": "OpenRouter API key not configured. Set OPENROUTER_API_KEY to use openrouter/* models.",
+        }
+        return messages[requested_provider]
 
     def _get_requested_provider(self, model: str) -> ProviderType | None:
         if model.startswith("openai/"):

@@ -5,12 +5,12 @@ import string
 import time
 from typing import Any
 
-from .base import BaseProvider, ProviderResult, ToolCall
+from .base import ProviderResult, ToolCall
 
 
-class GrokProvider(BaseProvider):
+class GrokProvider:
     def __init__(self, model_id: str):
-        super().__init__(model_id)
+        self.model_id = model_id
         self._xml_buffer = ""
 
     def process_text_content(
@@ -50,22 +50,6 @@ class GrokProvider(BaseProvider):
             extracted_tool_calls=tool_calls,
             was_transformed=True,
         )
-
-    def prepare_request(
-        self, request: dict[str, Any], original_request: dict[str, Any]
-    ) -> dict[str, Any]:
-        if original_request.get("thinking"):
-            if "mini" in self.model_id.lower():
-                budget = original_request["thinking"].get("budget_tokens", 0)
-                request["reasoning_effort"] = "high" if budget >= 20000 else "low"
-            request.pop("thinking", None)
-        return request
-
-    def should_handle(self, model_id: str) -> bool:
-        return "grok" in model_id.lower() or "x-ai/" in model_id.lower()
-
-    def get_name(self) -> str:
-        return "GrokProvider"
 
     def reset(self) -> None:
         self._xml_buffer = ""
