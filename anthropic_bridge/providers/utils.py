@@ -5,6 +5,49 @@ import time
 from collections.abc import AsyncIterator
 from typing import Any
 
+import tiktoken
+
+_encoding: tiktoken.Encoding | None = None
+
+
+def _get_encoding() -> tiktoken.Encoding:
+    global _encoding
+    if _encoding is None:
+        _encoding = tiktoken.get_encoding("cl100k_base")
+    return _encoding
+
+
+def estimate_input_tokens(messages: list[dict[str, Any]]) -> int:
+    """Estimate input token count from OpenAI-format messages using tiktoken.
+
+    Uses cl100k_base encoding which is a reasonable approximation for most models.
+    Adds per-message overhead similar to OpenAI's token counting rules.
+    """
+    enc = _get_encoding()
+    total = 0
+    for msg in messages:
+        total += 4  # every message has <|im_start|>role\n ... <|im_end|>\n
+        content = msg.get("content")
+        if isinstance(content, str):
+            total += len(enc.encode(content))
+        elif isinstance(content, list):
+            for part in content:
+                if isinstance(part, dict):
+                    text = part.get("text") or part.get("content") or ""
+                    if text:
+                        total += len(enc.encode(text))
+                elif isinstance(part, str):
+                    total += len(enc.encode(part))
+        # Count tool call arguments
+        for tc in msg.get("tool_calls", []):
+            fn = tc.get("function", {})
+            if fn.get("name"):
+                total += len(enc.encode(fn["name"]))
+            if fn.get("arguments"):
+                total += len(enc.encode(fn["arguments"]))
+    total += 2  # assistant priming
+    return total
+
 
 async def yield_error_events(
     message: str, model: str

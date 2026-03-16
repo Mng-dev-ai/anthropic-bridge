@@ -9,6 +9,7 @@ dependencies = [
     "uvicorn>=0.32.0",
     "httpx>=0.28.0",
     "aiofiles>=25.1.0",
+    "tiktoken>=0.7.0",
 ]
 
 [project.optional-dependencies]

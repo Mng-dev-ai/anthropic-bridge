@@ -1,3 +1,4 @@
+import asyncio
 import json
 import random
 import string
@@ -6,6 +7,8 @@ from collections.abc import AsyncIterator
 from typing import Any
 
 import httpx
+
+from .utils import estimate_input_tokens
 
 
 def build_responses_input(
@@ -89,6 +92,36 @@ def convert_tools_for_responses(
     ]
 
 
+def _estimate_responses_input_tokens(
+    input_messages: list[dict[str, Any]], instructions: str
+) -> int:
+    """Estimate tokens for Responses API format by converting to a flat message list."""
+    messages: list[dict[str, Any]] = []
+    if instructions:
+        messages.append({"role": "system", "content": instructions})
+    for item in input_messages:
+        if item.get("role"):
+            messages.append({"role": item["role"], "content": item.get("content", "")})
+        elif item.get("type") == "function_call_output":
+            messages.append({"role": "tool", "content": item.get("output", "")})
+        elif item.get("type") == "function_call":
+            messages.append(
+                {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [
+                        {
+                            "function": {
+                                "name": item.get("name", ""),
+                                "arguments": item.get("arguments", ""),
+                            }
+                        }
+                    ],
+                }
+            )
+    return estimate_input_tokens(messages)
+
+
 async def stream_responses_api(
     endpoint: str,
     headers: dict[str, str],
@@ -96,6 +129,11 @@ async def stream_responses_api(
     target_model: str,
 ) -> AsyncIterator[str]:
     msg_id = f"msg_{int(time.time())}_{_random_id()}"
+    estimated_input = await asyncio.to_thread(
+        _estimate_responses_input_tokens,
+        request_body.get("input", []),
+        request_body.get("instructions", ""),
+    )
 
     yield _sse(
         "message_start",
@@ -110,7 +148,7 @@ async def stream_responses_api(
                 "stop_reason": None,
                 "stop_sequence": None,
                 "usage": {
-                        "input_tokens": 0,
+                        "input_tokens": estimated_input,
                         "cache_creation_input_tokens": 0,
                         "cache_read_input_tokens": 0,
                         "output_tokens": 1,

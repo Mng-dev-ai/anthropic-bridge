@@ -1,3 +1,4 @@
+import asyncio
 import json
 import random
 import string
@@ -17,7 +18,7 @@ from ..responses_api import (
     convert_tools_for_responses,
     stream_responses_api,
 )
-from ..utils import map_reasoning_effort, yield_error_events
+from ..utils import estimate_input_tokens, map_reasoning_effort, yield_error_events
 from .auth import get_copilot_token
 
 COPILOT_CHAT_API_URL = "https://api.githubcopilot.com/chat/completions"
@@ -213,6 +214,9 @@ class CopilotProvider:
         self, payload: dict[str, Any], token: str
     ) -> AsyncIterator[str]:
         msg_id = f"msg_{int(time.time())}_{self._random_id()}"
+        estimated_input = await asyncio.to_thread(
+            estimate_input_tokens, payload.get("messages", [])
+        )
 
         yield self._sse(
             "message_start",
@@ -226,7 +230,7 @@ class CopilotProvider:
                     "model": self.target_model,
                     "stop_reason": None,
                     "stop_sequence": None,
-                    "usage": {"input_tokens": 0, "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0, "output_tokens": 0},
+                    "usage": {"input_tokens": estimated_input, "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0, "output_tokens": 0},
                 },
             },
         )

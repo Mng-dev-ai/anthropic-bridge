@@ -1,3 +1,4 @@
+import asyncio
 import json
 import random
 import string
@@ -13,7 +14,7 @@ from ...transform import (
     convert_anthropic_tool_choice_to_openai,
     convert_anthropic_tools_to_openai,
 )
-from ..utils import yield_error_events
+from ..utils import estimate_input_tokens, yield_error_events
 from .registry import ProviderRegistry
 
 OPENROUTER_API_URL = "https://openrouter.ai/api/v1/chat/completions"
@@ -120,6 +121,9 @@ class OpenRouterProvider:
         self, payload: dict[str, Any], provider: Any
     ) -> AsyncIterator[str]:
         msg_id = f"msg_{int(time.time())}_{self._random_id()}"
+        estimated_input = await asyncio.to_thread(
+            estimate_input_tokens, payload.get("messages", [])
+        )
 
         yield self._sse(
             "message_start",
@@ -134,7 +138,7 @@ class OpenRouterProvider:
                     "stop_reason": None,
                     "stop_sequence": None,
                     "usage": {
-                        "input_tokens": 0,
+                        "input_tokens": estimated_input,
                         "cache_creation_input_tokens": 0,
                         "cache_read_input_tokens": 0,
                         "output_tokens": 1,
